@@ -109,6 +109,7 @@ Frame:
 | `ble_scan_stop` | `seq` | `{"resp":"ble_scan_stop","seq":N,"status":"started"}` (encerra scan em andamento) | 2 |
 | `deauth` | `seq`, `bssid` (string), `target` (string, opcional, default broadcast), `channel` (1–14), `count` (opcional, default 10, max 1000), `reason` (opcional, default 7) | `{"resp":"deauth","seq":N,"status":"completed","sent":N,"channel":N,"reason":N}` | 3 |
 | `beacon_flood` | `seq`, `channel` (1–14), `ssids` (array de strings, 1–32, cada uma ≤32 bytes), `cycles` (opcional, default 50, max 200) | `{"resp":"beacon_flood","seq":N,"status":"completed","sent":N,"channel":N,"cycles":N,"ssids":N}` | 3 |
+| `ble_spam_apple` | `seq`, `cycles` (opcional, default 50, max 500) | `{"resp":"ble_spam_apple","seq":N,"status":"completed","sent":N,"cycles":N}`. Pausa adv do GATT durante o spam e retoma ao final. Cada cycle ~100ms. | 4 |
 
 ### Erros padronizados
 
@@ -132,6 +133,8 @@ Toda resposta de erro segue o schema:
 | `bad_ssids` | Campo `ssids` ausente ou tamanho fora de 1–32 |
 | `bad_ssid_entry` | Algum item do array `ssids` não é string ou está vazio |
 | `beacon_failed` | `esp_wifi_80211_tx` rejeitou a frame de beacon |
+| `spam_busy` | `ble_spam_apple` solicitado durante outro spam |
+| `spam_failed` | NimBLE rejeitou o adv (`msg` = nome do erro) |
 
 ### Exemplos de troca
 
@@ -338,3 +341,4 @@ Future<void> connectAndPing() async {
 | 2026-05-04 | Phase 2 | Comandos `ble_scan` / `ble_scan_stop` + TLV `BLE_SCAN_DEV` (0x12) e `BLE_SCAN_DONE` (0x13); dedup por MAC; mfg_data |
 | 2026-05-04 | Phase 3 | Comando `deauth` (raw 802.11 mgmt frame subtype 0x0C); pode requerer patch do filtro Espressif se `esp_wifi_80211_tx` rejeitar |
 | 2026-05-04 | Phase 3 | Comando `beacon_flood`: gera beacon (subtype 0x08) com SSIDs do app, BSSID derivado de hash(ssid+idx) com prefixo locally-administered (0x02:..) |
+| 2026-05-04 | Phase 4 | Comando `ble_spam_apple`: spam de Apple Continuity Proximity Pairing (subtype 0x07), 5 modelos (AirPods/Pro/Max/Beats/Pro2), random MAC por cycle |

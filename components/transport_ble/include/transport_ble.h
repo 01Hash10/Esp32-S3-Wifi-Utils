@@ -17,3 +17,7 @@ void transport_ble_send_cmd(const uint8_t *data, size_t len);
 
 // Envia uma frame TLV completa via Notify na characteristic stream.
 void transport_ble_send_stream(const uint8_t *data, size_t len);
+
+// Reinicia o advertising do GATT (chamado por hacking_ble após spam).
+// No-op se já estiver advertising ou se houver cliente conectado.
+void transport_ble_advertising_resume(void);

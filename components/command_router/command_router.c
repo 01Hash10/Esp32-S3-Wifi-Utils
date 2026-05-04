@@ -3,6 +3,7 @@
 #include "scan_wifi.h"
 #include "scan_ble.h"
 #include "hacking_wifi.h"
+#include "hacking_ble.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -178,6 +179,31 @@ static void handle_deauth(cJSON *root)
     }
 }
 
+static void handle_ble_spam_apple(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *cyc_j = cJSON_GetObjectItemCaseSensitive(root, "cycles");
+    uint16_t cycles = cJSON_IsNumber(cyc_j) ? (uint16_t)cyc_j->valueint : 50;
+
+    uint16_t sent = 0;
+    esp_err_t err = hacking_ble_apple_spam(cycles, &sent);
+
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "ble_spam_apple");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "completed");
+        cJSON_AddNumberToObject(resp, "sent", sent);
+        cJSON_AddNumberToObject(resp, "cycles", cycles);
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "spam_busy", NULL);
+    } else {
+        send_err(seq, "spam_failed", esp_err_to_name(err));
+    }
+}
+
 static void handle_beacon_flood(cJSON *root)
 {
     int seq = seq_of(root);
@@ -293,6 +319,8 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_deauth(root);
     } else if (strcmp(c, "beacon_flood") == 0) {
         handle_beacon_flood(root);
+    } else if (strcmp(c, "ble_spam_apple") == 0) {
+        handle_ble_spam_apple(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }
@@ -302,6 +330,6 @@ void command_router_handle_json(const uint8_t *data, size_t len)
 
 esp_err_t command_router_init(void)
 {
-    ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan, ble_scan, ble_scan_stop, deauth, beacon_flood)");
+    ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan, ble_scan, ble_scan_stop, deauth, beacon_flood, ble_spam_apple)");
     return ESP_OK;
 }

@@ -97,7 +97,10 @@ ou removidos ao longo do projeto.
 
 ## Phase 4 — Hacking BLE
 
-- [ ] BLE spam — Apple Continuity (popup AirPods/etc)
+- [x] BLE spam — Apple Continuity (popup AirPods/etc) — TX validado (100/100
+  cycles), validação visual em iPhone pendente. Limitação: MAC fixo durante
+  o spam (NimBLE não permite mudar addr enquanto há GATT conectado),
+  iPhone pode coalescer popups por MAC.
 - [ ] BLE spam — Samsung EasySetup
 - [ ] BLE spam — Google Fast Pair
 - [ ] BLE spam — multi-vendor concorrente

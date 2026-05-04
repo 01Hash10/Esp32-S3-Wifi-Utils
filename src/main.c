@@ -12,6 +12,7 @@
 #include "scan_wifi.h"
 #include "scan_ble.h"
 #include "hacking_wifi.h"
+#include "hacking_ble.h"
 
 static const char *TAG = "boot-diag";
 
@@ -41,6 +42,7 @@ void app_main(void)
     ESP_ERROR_CHECK(scan_wifi_init(transport_ble_send_stream));
     ESP_ERROR_CHECK(scan_ble_init(transport_ble_send_stream));
     ESP_ERROR_CHECK(hacking_wifi_init());
+    ESP_ERROR_CHECK(hacking_ble_init());
 
     while (1) {
         log_mem();

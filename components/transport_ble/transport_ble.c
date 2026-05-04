@@ -241,6 +241,13 @@ void transport_ble_send_cmd(const uint8_t *data, size_t len)
     send_notify(s_cmd_attr_handle, s_cmd_subscribed, data, len);
 }
 
+void transport_ble_advertising_resume(void)
+{
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) return; // adv suprimida durante conexão
+    if (ble_gap_adv_active()) return;
+    advertise();
+}
+
 void transport_ble_send_stream(const uint8_t *data, size_t len)
 {
     send_notify(s_stream_attr_handle, s_stream_subscribed, data, len);
