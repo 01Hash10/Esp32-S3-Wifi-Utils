@@ -143,14 +143,16 @@ Cache do CMake corrompido. Solução: `rm -rf .pio/build && pio run`.
 
 ## Status
 
-- [x] Setup inicial do projeto
-- [x] Configuração de PSRAM Octal + 16MB flash
-- [x] Diagnóstico de boot (SRAM/PSRAM)
-- [x] Workflow de flash via USB-Serial-JTAG
-- [ ] WiFi scan (próximo)
-- [ ] Bluetooth scan
-- [ ] (demais features a definir)
+Phase 0 (Foundation) concluída. Próximo: Phase 1 (BLE transport + protocolo).
 
-## Roadmap
+Roadmap completo com checklist de todas as features (scan / hacking /
+defense) em [`ROADMAP.md`](ROADMAP.md).
 
-A definir conforme progresso.
+## Arquitetura (decisões fechadas)
+
+- **Firmware**: ESP-IDF 5.4 puro, C
+- **App**: Flutter (`flutter_blue_plus`)
+- **Transporte**: BLE GATT
+- **Protocolo híbrido**:
+  - JSON minificado em `cmd_ctrl` (comandos pontuais)
+  - TLV binário em `stream` (scan results, eventos, pcap)

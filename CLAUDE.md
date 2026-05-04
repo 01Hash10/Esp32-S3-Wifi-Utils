@@ -60,6 +60,19 @@ Usar `monitor.sh` (pyserial direto).
 ├── include/  lib/  test/   # placeholders padrão IDF/PlatformIO
 ```
 
+## Decisões de arquitetura (fechadas)
+
+- **App**: Flutter + `flutter_blue_plus`
+- **Transporte**: BLE GATT (custom service, NUS-style)
+- **Protocolo híbrido**:
+  - `cmd_ctrl` characteristic (Write+Notify) → **JSON minificado**
+    (comandos, ack/err, status — baixa frequência)
+  - `stream` characteristic (Notify) → **TLV binário** (scan results,
+    eventos defense, pcap chunks — alta frequência)
+- **Frame TLV**: `[u16 length BE][u8 msg_type][u8 seq][payload]`
+- **Roadmap**: `ROADMAP.md` é a fonte de verdade do que está feito vs
+  pendente. Checklist por fase. Atualizar ao concluir cada item.
+
 ## Convenções
 
 - Sem comentários narrativos no código (manter `main.c` enxuto).
