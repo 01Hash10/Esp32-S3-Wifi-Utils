@@ -2,6 +2,7 @@
 #include "transport_ble.h"
 #include "scan_wifi.h"
 #include "scan_ble.h"
+#include "hacking_wifi.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -113,6 +114,124 @@ static void handle_ble_scan(cJSON *root)
     }
 }
 
+static int parse_mac(const char *s, uint8_t out[6])
+{
+    if (!s) return -1;
+    unsigned b[6];
+    if (sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x",
+               &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) {
+        return -1;
+    }
+    for (int i = 0; i < 6; i++) out[i] = (uint8_t)(b[i] & 0xFF);
+    return 0;
+}
+
+static void handle_deauth(cJSON *root)
+{
+    int seq = seq_of(root);
+
+    cJSON *bssid_j  = cJSON_GetObjectItemCaseSensitive(root, "bssid");
+    cJSON *target_j = cJSON_GetObjectItemCaseSensitive(root, "target");
+    cJSON *ch_j     = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *count_j  = cJSON_GetObjectItemCaseSensitive(root, "count");
+    cJSON *reason_j = cJSON_GetObjectItemCaseSensitive(root, "reason");
+
+    uint8_t bssid[6];
+    if (!cJSON_IsString(bssid_j) || parse_mac(bssid_j->valuestring, bssid) != 0) {
+        send_err(seq, "bad_bssid", NULL);
+        return;
+    }
+
+    uint8_t target[6];
+    if (cJSON_IsString(target_j)) {
+        if (parse_mac(target_j->valuestring, target) != 0) {
+            send_err(seq, "bad_target", NULL);
+            return;
+        }
+    } else {
+        memset(target, 0xFF, 6); // broadcast
+    }
+
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 14) {
+        send_err(seq, "bad_channel", NULL);
+        return;
+    }
+    uint8_t channel = (uint8_t)ch_j->valueint;
+    uint16_t count  = cJSON_IsNumber(count_j)  ? (uint16_t)count_j->valueint  : 10;
+    uint16_t reason = cJSON_IsNumber(reason_j) ? (uint16_t)reason_j->valueint : 7;
+
+    uint16_t sent = 0;
+    esp_err_t err = hacking_wifi_deauth(target, bssid, channel, count, reason, &sent);
+
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "deauth");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "completed");
+        cJSON_AddNumberToObject(resp, "sent", sent);
+        cJSON_AddNumberToObject(resp, "channel", channel);
+        cJSON_AddNumberToObject(resp, "reason", reason);
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else {
+        send_err(seq, "deauth_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_beacon_flood(cJSON *root)
+{
+    int seq = seq_of(root);
+
+    cJSON *ch_j     = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *cyc_j    = cJSON_GetObjectItemCaseSensitive(root, "cycles");
+    cJSON *ssids_j  = cJSON_GetObjectItemCaseSensitive(root, "ssids");
+
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 14) {
+        send_err(seq, "bad_channel", NULL);
+        return;
+    }
+    if (!cJSON_IsArray(ssids_j)) {
+        send_err(seq, "bad_ssids", NULL);
+        return;
+    }
+    int n = cJSON_GetArraySize(ssids_j);
+    if (n == 0 || n > 32) {
+        send_err(seq, "bad_ssids", "1..32 entries");
+        return;
+    }
+
+    const char *ssids[32];
+    for (int i = 0; i < n; i++) {
+        cJSON *s = cJSON_GetArrayItem(ssids_j, i);
+        if (!cJSON_IsString(s) || !s->valuestring || s->valuestring[0] == 0) {
+            send_err(seq, "bad_ssid_entry", NULL);
+            return;
+        }
+        ssids[i] = s->valuestring;
+    }
+
+    uint8_t channel = (uint8_t)ch_j->valueint;
+    uint16_t cycles = cJSON_IsNumber(cyc_j) ? (uint16_t)cyc_j->valueint : 50;
+
+    uint16_t sent = 0;
+    esp_err_t err = hacking_wifi_beacon_flood(channel, cycles,
+                                              ssids, (size_t)n, &sent);
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "beacon_flood");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "completed");
+        cJSON_AddNumberToObject(resp, "sent", sent);
+        cJSON_AddNumberToObject(resp, "channel", channel);
+        cJSON_AddNumberToObject(resp, "cycles", cycles);
+        cJSON_AddNumberToObject(resp, "ssids", n);
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else {
+        send_err(seq, "beacon_failed", esp_err_to_name(err));
+    }
+}
+
 static void handle_ble_scan_stop(cJSON *root)
 {
     int seq = seq_of(root);
@@ -170,6 +289,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_ble_scan(root);
     } else if (strcmp(c, "ble_scan_stop") == 0) {
         handle_ble_scan_stop(root);
+    } else if (strcmp(c, "deauth") == 0) {
+        handle_deauth(root);
+    } else if (strcmp(c, "beacon_flood") == 0) {
+        handle_beacon_flood(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }
@@ -179,6 +302,6 @@ void command_router_handle_json(const uint8_t *data, size_t len)
 
 esp_err_t command_router_init(void)
 {
-    ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan, ble_scan, ble_scan_stop)");
+    ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan, ble_scan, ble_scan_stop, deauth, beacon_flood)");
     return ESP_OK;
 }

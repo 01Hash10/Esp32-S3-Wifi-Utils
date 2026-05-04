@@ -70,13 +70,24 @@ ou removidos ao longo do projeto.
 ## Phase 3 — Hacking WiFi
 
 ### MVP (primeiras a entregar)
-- [ ] Deauth attack — single target (cliente específico)
-- [ ] Beacon flood — lista randômica de SSIDs
+- [~] Deauth attack — single target — código pronto, **validação pendente**
+  (não testável neste setup: roteador da empresa em 5GHz e ESP32-S3 só
+  tem 2.4GHz; precisa de cliente 2.4GHz separado pra confirmar TX).
+- [~] Deauth broadcast — mesmo bloqueio acima.
+- [~] Beacon flood — código pronto, `esp_wifi_80211_tx` retorna OK em
+  todos os 1000 frames mas **scanner de celular não detecta os SSIDs
+  consistentemente**. Pendências de melhoria:
+  - Confirmar que TX está de fato no ar via modo promiscuous do próprio
+    ESP (sniff dos próprios beacons em outro componente).
+  - Investigar se IDF 5.4 limita beacon raw em STA mode (testar APSTA
+    + WIFI_IF_AP).
+  - Comparar com scanner de baixo nível no Mac (`wdutil`, `Wireless Diagnostics`).
+  - Ajustar IEs (HT/VHT capabilities) se filtros do scanner exigirem.
 - [ ] WPA handshake capture (EAPOL 4-way) → exporta pcap
 
 ### Demais
 - [ ] Deauth broadcast (kick all clients de um BSSID)
-- [ ] Beacon flood — lista custom de SSIDs (do app)
+- [~] Beacon flood — lista custom de SSIDs (do app) — feito acima, validação pendente
 - [ ] PMKID capture
 - [ ] Probe request sniffing + dossiê de devices
 - [ ] Evil twin / Captive portal (AP fake + DNS hijack)
