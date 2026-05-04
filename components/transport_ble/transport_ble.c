@@ -148,23 +148,31 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
 
 static void advertise(void)
 {
-    struct ble_hs_adv_fields fields = {0};
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.tx_pwr_lvl_is_present = 1;
-    fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+    // Adv packet (limite 31 bytes): flags + nome completo.
+    struct ble_hs_adv_fields adv_fields = {0};
+    adv_fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
     const char *name = ble_svc_gap_device_name();
-    fields.name = (uint8_t *)name;
-    fields.name_len = strlen(name);
-    fields.name_is_complete = 1;
+    adv_fields.name = (uint8_t *)name;
+    adv_fields.name_len = strlen(name);
+    adv_fields.name_is_complete = 1;
 
-    fields.uuids128 = (ble_uuid128_t *)&svc_uuid;
-    fields.num_uuids128 = 1;
-    fields.uuids128_is_complete = 1;
-
-    int rc = ble_gap_adv_set_fields(&fields);
+    int rc = ble_gap_adv_set_fields(&adv_fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "adv_set_fields rc=%d", rc);
+        return;
+    }
+
+    // Scan response (limite 31 bytes): service UUID 128-bit (18 bytes).
+    // Service UUID 128-bit não cabe junto com o nome no adv packet.
+    struct ble_hs_adv_fields rsp_fields = {0};
+    rsp_fields.uuids128 = (ble_uuid128_t *)&svc_uuid;
+    rsp_fields.num_uuids128 = 1;
+    rsp_fields.uuids128_is_complete = 1;
+
+    rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "adv_rsp_set_fields rc=%d", rc);
         return;
     }
 
