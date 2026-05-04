@@ -31,8 +31,30 @@ async def find_device(scan_only: bool = False, timeout: float = 8.0):
     return target
 
 
+def decode_wifi_ap(payload: bytes) -> dict:
+    bssid = ":".join(f"{b:02x}" for b in payload[0:6])
+    rssi = int.from_bytes(payload[6:7], "big", signed=True)
+    channel = payload[7]
+    auth = payload[8]
+    ssid_len = payload[9]
+    ssid = payload[10:10 + ssid_len].decode("utf-8", errors="replace")
+    return {
+        "bssid": bssid, "rssi": rssi, "channel": channel,
+        "auth": auth, "ssid": ssid or "<hidden>",
+    }
+
+
+def decode_wifi_done(payload: bytes) -> dict:
+    return {
+        "ap_count": int.from_bytes(payload[0:2], "big"),
+        "scan_ms":  int.from_bytes(payload[2:6], "big"),
+        "status":   payload[6],
+    }
+
+
 async def run_ping(client: BleakClient):
     inbox: asyncio.Queue = asyncio.Queue()
+    stream_inbox: asyncio.Queue = asyncio.Queue()
 
     def cmd_handler(_handle, data: bytearray):
         try:
@@ -43,10 +65,10 @@ async def run_ping(client: BleakClient):
 
     def stream_handler(_handle, data: bytearray):
         if len(data) >= 4:
-            length = (data[0] << 8) | data[1]
             mtype = data[2]
             seq = data[3]
-            print(f"  stream  type=0x{mtype:02x} seq={seq} payload={len(data)-4}B")
+            payload = bytes(data[4:])
+            stream_inbox.put_nowait((mtype, seq, payload))
 
     await client.start_notify(CMD_UUID, cmd_handler)
     await client.start_notify(STREAM_UUID, stream_handler)
@@ -61,6 +83,36 @@ async def run_ping(client: BleakClient):
             print(f"← recv: {resp}")
         except asyncio.TimeoutError:
             print(f"  ✗ timeout waiting reply for '{cmd}'")
+
+    print("\n→ send: wifi_scan")
+    await client.write_gatt_char(
+        CMD_UUID, json.dumps({"cmd": "wifi_scan", "seq": 200}).encode("utf-8"),
+        response=True,
+    )
+    try:
+        ack = await asyncio.wait_for(inbox.get(), timeout=2.0)
+        print(f"← ack: {ack}")
+    except asyncio.TimeoutError:
+        print("  ✗ no ack for wifi_scan"); return
+
+    print("\n→ awaiting WIFI_SCAN_AP frames (timeout 12s)...")
+    aps = []
+    while True:
+        try:
+            mtype, seq, payload = await asyncio.wait_for(stream_inbox.get(), timeout=12.0)
+        except asyncio.TimeoutError:
+            print("  ✗ stream timeout (no SCAN_DONE received)")
+            return
+        if mtype == 0x10:
+            ap = decode_wifi_ap(payload)
+            aps.append(ap)
+            print(f"  AP  ssid={ap['ssid']!r:<32} bssid={ap['bssid']} rssi={ap['rssi']} ch={ap['channel']} auth={ap['auth']}")
+        elif mtype == 0x11:
+            done = decode_wifi_done(payload)
+            print(f"\nSCAN_DONE: {done['ap_count']} APs in {done['scan_ms']}ms (received {len(aps)}, status={done['status']})")
+            return
+        else:
+            print(f"  ?  type=0x{mtype:02x} payload={len(payload)}B (ignored)")
 
 
 async def main(scan_only: bool):

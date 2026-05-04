@@ -104,6 +104,7 @@ Frame:
 | `ping` | `seq` | `{"resp":"pong","seq":N,"uptime_ms":N}` | 1 |
 | `hello` | `seq` | `{"resp":"hello","seq":N,"fw":...,"idf":...,"chip":...,"cores":N,"rev":N}` | 1 |
 | `status` | `seq` | `{"resp":"status","seq":N,"uptime_ms":N,"free_sram":N,"free_psram":N,"min_free_sram":N}` | 1 |
+| `wifi_scan` | `seq` | `{"resp":"wifi_scan","seq":N,"status":"started"}` (ack imediato; resultados via `stream`) | 2 |
 
 ### Erros padronizados
 
@@ -117,6 +118,8 @@ Toda resposta de erro segue o schema:
 | `bad_json` | JSON inválido / não parseável |
 | `missing_cmd` | JSON sem campo `cmd` ou tipo inválido |
 | `unknown_cmd` | Comando desconhecido (`msg` traz o cmd recebido) |
+| `scan_busy` | `wifi_scan` solicitado enquanto outro scan está rodando |
+| `scan_failed` | `esp_wifi_scan_start` retornou erro (`msg` = nome do erro) |
 
 ### Exemplos de troca
 
@@ -144,11 +147,50 @@ Toda resposta de erro segue o schema:
 
 ## Catálogo de eventos TLV (`stream`)
 
-> _Vazio. Será preenchido em ordem conforme cada feature é implementada._
-
-| `type` (hex) | Nome | Direção | Payload | Phase |
+| `type` | Nome | Direção | Payload | Phase |
 |---|---|---|---|---|
-| _(nenhum ainda)_ | | | | |
+| `0x10` | `WIFI_SCAN_AP` | device → app | 1 AP por frame, schema abaixo | 2 |
+| `0x11` | `WIFI_SCAN_DONE` | device → app | resumo final do scan | 2 |
+
+### `0x10 WIFI_SCAN_AP` — payload
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `bssid` | MAC do AP, big-endian (byte 0 é o mais significativo do OUI) |
+| 6 | 1 | `rssi` | int8, dBm (negativo) |
+| 7 | 1 | `channel` | uint8, canal primário (1–13 / 1–14) |
+| 8 | 1 | `auth_mode` | uint8, ver tabela abaixo |
+| 9 | 1 | `ssid_len` | uint8, comprimento do SSID em bytes (0–32) |
+| 10 | `ssid_len` | `ssid` | UTF-8, sem NUL terminador |
+
+**Auth mode** (valor de `wifi_auth_mode_t` do ESP-IDF):
+
+| Valor | Significado |
+|---|---|
+| 0 | OPEN |
+| 1 | WEP |
+| 2 | WPA_PSK |
+| 3 | WPA2_PSK |
+| 4 | WPA_WPA2_PSK |
+| 5 | WPA2_ENTERPRISE |
+| 6 | WPA3_PSK |
+| 7 | WPA2_WPA3_PSK |
+| 8 | WAPI_PSK |
+| 9 | OWE |
+| 10 | WPA3_ENT_192 |
+
+### `0x11 WIFI_SCAN_DONE` — payload (7 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `ap_count` | uint16 BE, total de APs detectados |
+| 2 | 4 | `scan_time_ms` | uint32 BE, duração do scan em ms |
+| 6 | 1 | `status` | 0 = ok, 1 = erro (envio truncado) |
+
+> Sequência típica: app envia `wifi_scan` em `cmd_ctrl` → recebe ack →
+> recebe N frames `WIFI_SCAN_AP` em `stream` (um por AP) → recebe
+> `WIFI_SCAN_DONE` indicando fim. Os `seq` do TLV são incrementais por
+> characteristic (independente do `seq` do JSON em `cmd_ctrl`).
 
 ### Faixas reservadas de `msg_type`
 
@@ -210,10 +252,33 @@ Future<void> connectAndPing() async {
     print('cmd_ctrl recv: $json');
   });
 
-  // Listener para frames TLV no stream (a partir da Phase 2)
+  // Listener para frames TLV no stream
   stream.lastValueStream.listen((bytes) {
-    // bytes[0..1] = length BE, bytes[2] = type, bytes[3] = seq, resto = payload
-    print('stream recv: ${bytes.length} bytes, type=0x${bytes[2].toRadixString(16)}');
+    if (bytes.length < 4) return;
+    final length = (bytes[0] << 8) | bytes[1];
+    final type = bytes[2];
+    final seq = bytes[3];
+    final payload = bytes.sublist(4);
+
+    if (type == 0x10 && payload.length >= 10) {
+      // WIFI_SCAN_AP
+      final bssid = payload.sublist(0, 6)
+          .map((b) => b.toRadixString(16).padLeft(2, '0')).join(':');
+      final rssi = payload[6].toSigned(8);
+      final channel = payload[7];
+      final auth = payload[8];
+      final ssidLen = payload[9];
+      final ssid = utf8.decode(payload.sublist(10, 10 + ssidLen),
+                               allowMalformed: true);
+      print('AP: $ssid  bssid=$bssid  rssi=$rssi  ch=$channel  auth=$auth');
+    } else if (type == 0x11 && payload.length >= 7) {
+      // WIFI_SCAN_DONE
+      final apCount = (payload[0] << 8) | payload[1];
+      final scanMs = (payload[2] << 24) | (payload[3] << 16) |
+                     (payload[4] << 8) | payload[5];
+      final status = payload[6];
+      print('SCAN_DONE: $apCount APs in ${scanMs}ms, status=$status');
+    }
   });
 
   // 6. Ping
@@ -230,3 +295,4 @@ Future<void> connectAndPing() async {
 |---|---|---|
 | 2026-05-04 | Phase 1 | Definição inicial: service UUID, duas characteristics, frame TLV, schema JSON |
 | 2026-05-04 | Phase 1 | GATT server + comandos `ping`, `hello`, `status` operacionais; advertising como `WifiUtils-XXXX` |
+| 2026-05-04 | Phase 2 | Comando `wifi_scan` + TLV `WIFI_SCAN_AP` (0x10) e `WIFI_SCAN_DONE` (0x11); decode Dart |

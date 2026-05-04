@@ -9,6 +9,7 @@
 
 #include "transport_ble.h"
 #include "command_router.h"
+#include "scan_wifi.h"
 
 static const char *TAG = "boot-diag";
 
@@ -35,6 +36,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(command_router_init());
     ESP_ERROR_CHECK(transport_ble_init(command_router_handle_json));
+    ESP_ERROR_CHECK(scan_wifi_init(transport_ble_send_stream));
 
     while (1) {
         log_mem();

@@ -21,7 +21,12 @@
 //   0x40–0x4F  captura / dados
 //   0x50–0xFF  reservado
 typedef enum {
-    TLV_MSG_HEARTBEAT = 0x00,
+    // Control / sistema (0x00–0x0F)
+    TLV_MSG_HEARTBEAT       = 0x00,
+
+    // Scan results (0x10–0x1F)
+    TLV_MSG_WIFI_SCAN_AP    = 0x10,
+    TLV_MSG_WIFI_SCAN_DONE  = 0x11,
     // demais tipos serão adicionados conforme features são entregues.
 } tlv_msg_type_t;
 

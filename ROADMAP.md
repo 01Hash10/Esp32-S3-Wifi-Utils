@@ -43,9 +43,9 @@ ou removidos ao longo do projeto.
 ## Phase 2 — Scan
 
 ### WiFi
-- [ ] Scan ativo (probe request)
+- [x] Scan ativo (probe request)
 - [ ] Scan passivo (channel hop + listen)
-- [ ] Stream contínuo de results pro app
+- [x] Stream contínuo de results pro app
 - [ ] Channel hopping configurável
 - [ ] Decoding: BSSID, SSID, RSSI, canal, segurança, hidden flag
 - [ ] Lookup de OUI (vendor a partir do MAC)

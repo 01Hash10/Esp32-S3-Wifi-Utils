@@ -1,5 +1,6 @@
 #include "command_router.h"
 #include "transport_ble.h"
+#include "scan_wifi.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -70,6 +71,29 @@ static void handle_hello(cJSON *root)
     cJSON_Delete(resp);
 }
 
+static void send_ack(int seq, const char *cmd)
+{
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "resp", cmd);
+    cJSON_AddNumberToObject(resp, "seq", seq);
+    cJSON_AddStringToObject(resp, "status", "started");
+    send_json(resp);
+    cJSON_Delete(resp);
+}
+
+static void handle_wifi_scan(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = scan_wifi_start_active();
+    if (err == ESP_OK) {
+        send_ack(seq, "wifi_scan");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "scan_busy", NULL);
+    } else {
+        send_err(seq, "scan_failed", esp_err_to_name(err));
+    }
+}
+
 static void handle_status(cJSON *root)
 {
     cJSON *resp = cJSON_CreateObject();
@@ -110,6 +134,8 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_hello(root);
     } else if (strcmp(c, "status") == 0) {
         handle_status(root);
+    } else if (strcmp(c, "wifi_scan") == 0) {
+        handle_wifi_scan(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }
@@ -119,6 +145,6 @@ void command_router_handle_json(const uint8_t *data, size_t len)
 
 esp_err_t command_router_init(void)
 {
-    ESP_LOGI(TAG, "ready (cmds: ping, hello, status)");
+    ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan)");
     return ESP_OK;
 }
