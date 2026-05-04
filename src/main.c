@@ -7,6 +7,9 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
+#include "transport_ble.h"
+#include "command_router.h"
+
 static const char *TAG = "boot-diag";
 
 static void log_mem(void)
@@ -29,6 +32,9 @@ void app_main(void)
     esp_chip_info(&chip);
     ESP_LOGI(TAG, "Chip          : %s rev v%d.%d, %d core(s)",
              CONFIG_IDF_TARGET, chip.revision / 100, chip.revision % 100, chip.cores);
+
+    ESP_ERROR_CHECK(command_router_init());
+    ESP_ERROR_CHECK(transport_ble_init(command_router_handle_json));
 
     while (1) {
         log_mem();

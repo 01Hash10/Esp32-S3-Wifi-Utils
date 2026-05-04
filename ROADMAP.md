@@ -27,17 +27,18 @@ ou removidos ao longo do projeto.
 
 ## Phase 1 — Transport & Protocol
 
-- [ ] BLE GATT server (custom service UUID)
-- [ ] Characteristic `cmd_ctrl` (Write + Notify)
-- [ ] Characteristic `stream` (Notify)
-- [ ] Pareamento (Just Works inicialmente, PIN depois)
-- [ ] Encoder/decoder JSON minificado (cJSON ou similar)
-- [ ] Encoder/decoder TLV binário
-- [ ] Command router (dispatch por `msg_type`)
+- [x] BLE GATT server (custom service UUID, NimBLE host)
+- [x] Characteristic `cmd_ctrl` (Write + Notify)
+- [x] Characteristic `stream` (Notify)
+- [x] Pareamento (Just Works inicialmente, PIN depois)
+- [x] Encoder/decoder JSON minificado (cJSON da IDF)
+- [x] Encoder/decoder TLV binário (componente `protocol`)
+- [x] Command router (dispatch via JSON `cmd` field)
 - [ ] Heartbeat/keepalive bidirecional
-- [ ] Sequence numbers + detecção de perda
-- [ ] Error envelope padronizado
-- [ ] Configuração de MTU (negociar 247)
+- [x] Sequence numbers nos JSON responses
+- [x] Error envelope padronizado (`{err, seq, msg}`)
+- [x] Configuração de MTU (negociar 247)
+- [x] Comandos básicos: `ping`, `hello`, `status`
 
 ## Phase 2 — Scan
 

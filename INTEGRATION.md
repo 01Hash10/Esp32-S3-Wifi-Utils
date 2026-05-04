@@ -30,19 +30,27 @@ este manual no mesmo commit do firmware.
 
 ## Conexão e pareamento
 
-> A ser detalhado quando o GATT server estiver implementado (Phase 1, próximo passo).
+Sequência completa do app Flutter:
 
-Resumo planejado:
+1. **Scan** por nome com prefixo `WifiUtils-` OU pelo Service UUID.
+   O device anuncia `WifiUtils-XXXX` onde `XXXX` são os 4 últimos dígitos
+   hex do MAC BT.
+2. **Connect** ao peripheral. Pareamento é **Just Works** (sem PIN nesta fase).
+3. **Request MTU = 247** via `requestMtu(247)`. Confirme no log do firmware:
+   `transport-ble: mtu update conn=N mtu=247`.
+4. **Discover services + characteristics** dentro do service WifiUtils.
+5. **Subscribe (setNotifyValue=true)** em ambas as characteristics
+   (`cmd_ctrl` e `stream`). O firmware loga:
+   `transport-ble: subscribe attr=N notify=1`.
+6. **Validar conexão**: enviar `{"cmd":"hello","seq":1}` em `cmd_ctrl`.
+   Resposta esperada via Notify do mesmo `cmd_ctrl`:
+   ```json
+   {"resp":"hello","seq":1,"fw":"...","idf":"5.4.0","chip":"esp32s3","cores":2,"rev":2}
+   ```
 
-1. Scan no Flutter por nome `WifiUtils-` ou pelo Service UUID.
-2. Connect.
-3. Negociar MTU = 247 (request via `requestMtu(247)` no `flutter_blue_plus`).
-4. Discover services + characteristics.
-5. Subscribe aos `Notify` em ambas characteristics.
-6. Enviar `{"cmd":"hello"}` no `cmd_ctrl` para handshake → device responde com info.
-
-Pareamento: **Just Works** na Phase 1 (sem PIN). Pareamento com PIN/passkey
-fica pra fase posterior se necessário.
+> **Nota**: o protocolo JSON em `cmd_ctrl` envia uma mensagem por Write
+> (sem framing por newline ou comprimento) — o GATT já delimita o pacote.
+> Se mandar 2 JSONs no mesmo Write, o parser vai falhar.
 
 ## Protocolo híbrido
 
@@ -91,11 +99,48 @@ Frame:
 
 ## Catálogo de comandos JSON (`cmd_ctrl`)
 
-> _Vazio. Será preenchido em ordem conforme cada feature é implementada._
-
 | `cmd` | Args | Resposta | Phase |
 |---|---|---|---|
-| _(nenhum ainda)_ | | | |
+| `ping` | `seq` | `{"resp":"pong","seq":N,"uptime_ms":N}` | 1 |
+| `hello` | `seq` | `{"resp":"hello","seq":N,"fw":...,"idf":...,"chip":...,"cores":N,"rev":N}` | 1 |
+| `status` | `seq` | `{"resp":"status","seq":N,"uptime_ms":N,"free_sram":N,"free_psram":N,"min_free_sram":N}` | 1 |
+
+### Erros padronizados
+
+Toda resposta de erro segue o schema:
+```json
+{"err":"<code>","seq":<N>,"msg":"<detalhe opcional>"}
+```
+
+| `err` code | Quando |
+|---|---|
+| `bad_json` | JSON inválido / não parseável |
+| `missing_cmd` | JSON sem campo `cmd` ou tipo inválido |
+| `unknown_cmd` | Comando desconhecido (`msg` traz o cmd recebido) |
+
+### Exemplos de troca
+
+```jsonc
+// app → device (Write em cmd_ctrl)
+{"cmd":"ping","seq":42}
+// device → app (Notify em cmd_ctrl)
+{"resp":"pong","seq":42,"uptime_ms":12345}
+
+// app → device
+{"cmd":"hello","seq":1}
+// device → app
+{"resp":"hello","seq":1,"fw":"1","idf":"5.4.0","chip":"esp32s3","cores":2,"rev":2}
+
+// app → device
+{"cmd":"status","seq":7}
+// device → app
+{"resp":"status","seq":7,"uptime_ms":58210,"free_sram":328540,"free_psram":8386188,"min_free_sram":325120}
+
+// app → device (cmd inexistente)
+{"cmd":"foo","seq":99}
+// device → app
+{"err":"unknown_cmd","seq":99,"msg":"foo"}
+```
 
 ## Catálogo de eventos TLV (`stream`)
 
@@ -121,19 +166,60 @@ Frame:
 > _Snippets concretos serão adicionados conforme cada feature exporta API
 > usável para o app._
 
-### Conexão básica (planejado)
+### Conexão e ping (Phase 1)
 
 ```dart
-// flutter_blue_plus pseudo-code, será expandido na próxima entrega
-final device = await FlutterBluePlus.scanForName('WifiUtils-');
-await device.connect();
-await device.requestMtu(247);
-final svc = (await device.discoverServices())
-    .firstWhere((s) => s.uuid == Guid('e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c01'));
-final cmd = svc.characteristics.firstWhere((c) => c.uuid == Guid('...0c02'));
-final stream = svc.characteristics.firstWhere((c) => c.uuid == Guid('...0c03'));
-await cmd.setNotifyValue(true);
-await stream.setNotifyValue(true);
+import 'dart:convert';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+
+const svcUuid    = 'e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c01';
+const cmdUuid    = 'e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c02';
+const streamUuid = 'e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c03';
+
+Future<void> connectAndPing() async {
+  // 1. Scan
+  await FlutterBluePlus.startScan(
+    withServices: [Guid(svcUuid)],
+    timeout: const Duration(seconds: 5),
+  );
+  final result = await FlutterBluePlus.scanResults
+      .map((rs) => rs.firstWhere((r) => r.device.platformName.startsWith('WifiUtils-')))
+      .first;
+  await FlutterBluePlus.stopScan();
+
+  // 2. Connect
+  final device = result.device;
+  await device.connect(autoConnect: false);
+
+  // 3. MTU
+  await device.requestMtu(247);
+
+  // 4. Discover
+  final svc = (await device.discoverServices())
+      .firstWhere((s) => s.uuid == Guid(svcUuid));
+  final cmd = svc.characteristics.firstWhere((c) => c.uuid == Guid(cmdUuid));
+  final stream = svc.characteristics.firstWhere((c) => c.uuid == Guid(streamUuid));
+
+  // 5. Subscribe
+  await cmd.setNotifyValue(true);
+  await stream.setNotifyValue(true);
+
+  // Listener para respostas no cmd_ctrl
+  cmd.lastValueStream.listen((bytes) {
+    final json = utf8.decode(bytes);
+    print('cmd_ctrl recv: $json');
+  });
+
+  // Listener para frames TLV no stream (a partir da Phase 2)
+  stream.lastValueStream.listen((bytes) {
+    // bytes[0..1] = length BE, bytes[2] = type, bytes[3] = seq, resto = payload
+    print('stream recv: ${bytes.length} bytes, type=0x${bytes[2].toRadixString(16)}');
+  });
+
+  // 6. Ping
+  final ping = jsonEncode({'cmd': 'ping', 'seq': 42});
+  await cmd.write(utf8.encode(ping), withoutResponse: false);
+}
 ```
 
 ---
@@ -143,3 +229,4 @@ await stream.setNotifyValue(true);
 | Data | Phase | Mudança |
 |---|---|---|
 | 2026-05-04 | Phase 1 | Definição inicial: service UUID, duas characteristics, frame TLV, schema JSON |
+| 2026-05-04 | Phase 1 | GATT server + comandos `ping`, `hello`, `status` operacionais; advertising como `WifiUtils-XXXX` |
