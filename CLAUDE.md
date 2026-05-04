@@ -72,6 +72,16 @@ Usar `monitor.sh` (pyserial direto).
 - **Frame TLV**: `[u16 length BE][u8 msg_type][u8 seq][payload]`
 - **Roadmap**: `ROADMAP.md` é a fonte de verdade do que está feito vs
   pendente. Checklist por fase. Atualizar ao concluir cada item.
+- **Manual de integração mobile**: `INTEGRATION.md` é a documentação viva
+  de **como o app Flutter deve conversar com o firmware**. Contém:
+  UUIDs, schemas de comandos JSON, msg_types TLV, fluxos de pareamento,
+  exemplos de código Dart, diagramas de sequência quando relevante.
+
+  **Regra obrigatória**: toda feature nova que altera ou adiciona algo ao
+  protocolo BLE (novo comando, novo msg_type, novo characteristic, mudança
+  de schema) **DEVE** ser documentada em `INTEGRATION.md` no mesmo commit
+  que adiciona o código no firmware. Sem documentação ↔ feature incompleta.
+  Aplicar isso desde a Phase 1 e por todo o resto do desenvolvimento.
 
 ## Convenções
 
