@@ -55,9 +55,10 @@ ou removidos ao longo do projeto.
 - [ ] Export de pcap via BLE pro app
 
 ### BLE
-- [ ] Scan ativo + passivo
-- [ ] Parsing de advertising data (flags, services, mfg data)
-- [ ] Fingerprint por mfg data (Apple, Samsung, Google, etc)
+- [x] Scan passivo (NimBLE GAP discover)
+- [ ] Scan ativo (com scan request)
+- [x] Parsing de advertising data (flags, name, mfg data)
+- [ ] Fingerprint por mfg data (Apple, Samsung, Google, etc) — pode ser no app
 - [ ] Detecção de AirTags / SmartTags
 - [ ] Detecção de tracker following (RSSI seguindo no tempo)
 - [ ] Stream contínuo pro app

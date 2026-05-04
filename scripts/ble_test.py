@@ -52,6 +52,45 @@ def decode_wifi_done(payload: bytes) -> dict:
     }
 
 
+COMPANY_IDS = {
+    0x004C: "Apple",
+    0x0075: "Samsung",
+    0x00E0: "Google",
+    0x0006: "Microsoft",
+    0x0059: "Nordic",
+    0x000F: "Broadcom",
+}
+
+
+def decode_ble_dev(payload: bytes) -> dict:
+    mac = ":".join(f"{b:02x}" for b in payload[0:6])
+    addr_type = payload[6]
+    rssi = int.from_bytes(payload[7:8], "big", signed=True)
+    flags = payload[8]
+    name_len = payload[9]
+    name = payload[10:10 + name_len].decode("utf-8", errors="replace")
+    off = 10 + name_len
+    mfg_len = payload[off]; off += 1
+    mfg_data = bytes(payload[off:off + mfg_len])
+    company_id = None
+    company = ""
+    if mfg_len >= 2:
+        company_id = mfg_data[0] | (mfg_data[1] << 8)
+        company = COMPANY_IDS.get(company_id, f"0x{company_id:04x}")
+    return {
+        "mac": mac, "addr_type": addr_type, "rssi": rssi, "flags": flags,
+        "name": name, "company": company, "mfg_data": mfg_data,
+    }
+
+
+def decode_ble_done(payload: bytes) -> dict:
+    return {
+        "dev_count": int.from_bytes(payload[0:2], "big"),
+        "scan_ms":   int.from_bytes(payload[2:6], "big"),
+        "status":    payload[6],
+    }
+
+
 async def run_ping(client: BleakClient):
     inbox: asyncio.Queue = asyncio.Queue()
     stream_inbox: asyncio.Queue = asyncio.Queue()
@@ -110,6 +149,38 @@ async def run_ping(client: BleakClient):
         elif mtype == 0x11:
             done = decode_wifi_done(payload)
             print(f"\nSCAN_DONE: {done['ap_count']} APs in {done['scan_ms']}ms (received {len(aps)}, status={done['status']})")
+            break
+        else:
+            print(f"  ?  type=0x{mtype:02x} payload={len(payload)}B (ignored)")
+
+    # BLE scan
+    print("\n→ send: ble_scan duration_sec=8")
+    await client.write_gatt_char(
+        CMD_UUID, json.dumps({"cmd": "ble_scan", "seq": 300, "duration_sec": 8}).encode("utf-8"),
+        response=True,
+    )
+    try:
+        ack = await asyncio.wait_for(inbox.get(), timeout=2.0)
+        print(f"← ack: {ack}")
+    except asyncio.TimeoutError:
+        print("  ✗ no ack for ble_scan"); return
+
+    print("\n→ awaiting BLE_SCAN_DEV frames (timeout 12s)...")
+    devs = []
+    while True:
+        try:
+            mtype, seq, payload = await asyncio.wait_for(stream_inbox.get(), timeout=12.0)
+        except asyncio.TimeoutError:
+            print("  ✗ stream timeout"); return
+        if mtype == 0x12:
+            d = decode_ble_dev(payload)
+            devs.append(d)
+            name = d['name'] or "<no-name>"
+            extra = f" mfg={d['company']}" if d['company'] else ""
+            print(f"  DEV  mac={d['mac']} rssi={d['rssi']:>4} addr_t={d['addr_type']} name={name!r}{extra}")
+        elif mtype == 0x13:
+            done = decode_ble_done(payload)
+            print(f"\nBLE_SCAN_DONE: {done['dev_count']} devs in {done['scan_ms']}ms (status={done['status']})")
             return
         else:
             print(f"  ?  type=0x{mtype:02x} payload={len(payload)}B (ignored)")

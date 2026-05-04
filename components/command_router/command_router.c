@@ -1,6 +1,7 @@
 #include "command_router.h"
 #include "transport_ble.h"
 #include "scan_wifi.h"
+#include "scan_ble.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -94,6 +95,35 @@ static void handle_wifi_scan(cJSON *root)
     }
 }
 
+static void handle_ble_scan(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *dur = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+    uint16_t duration = 10; // default 10s
+    if (cJSON_IsNumber(dur) && dur->valueint >= 0 && dur->valueint < 600) {
+        duration = (uint16_t)dur->valueint;
+    }
+    esp_err_t err = scan_ble_start(duration);
+    if (err == ESP_OK) {
+        send_ack(seq, "ble_scan");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "scan_busy", NULL);
+    } else {
+        send_err(seq, "scan_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_ble_scan_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = scan_ble_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "ble_scan_stop");
+    } else {
+        send_err(seq, "scan_idle", NULL);
+    }
+}
+
 static void handle_status(cJSON *root)
 {
     cJSON *resp = cJSON_CreateObject();
@@ -136,6 +166,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_status(root);
     } else if (strcmp(c, "wifi_scan") == 0) {
         handle_wifi_scan(root);
+    } else if (strcmp(c, "ble_scan") == 0) {
+        handle_ble_scan(root);
+    } else if (strcmp(c, "ble_scan_stop") == 0) {
+        handle_ble_scan_stop(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }
@@ -145,6 +179,6 @@ void command_router_handle_json(const uint8_t *data, size_t len)
 
 esp_err_t command_router_init(void)
 {
-    ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan)");
+    ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan, ble_scan, ble_scan_stop)");
     return ESP_OK;
 }

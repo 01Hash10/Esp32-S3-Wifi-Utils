@@ -27,6 +27,8 @@ typedef enum {
     // Scan results (0x10–0x1F)
     TLV_MSG_WIFI_SCAN_AP    = 0x10,
     TLV_MSG_WIFI_SCAN_DONE  = 0x11,
+    TLV_MSG_BLE_SCAN_DEV    = 0x12,
+    TLV_MSG_BLE_SCAN_DONE   = 0x13,
     // demais tipos serão adicionados conforme features são entregues.
 } tlv_msg_type_t;
 

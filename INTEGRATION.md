@@ -105,6 +105,8 @@ Frame:
 | `hello` | `seq` | `{"resp":"hello","seq":N,"fw":...,"idf":...,"chip":...,"cores":N,"rev":N}` | 1 |
 | `status` | `seq` | `{"resp":"status","seq":N,"uptime_ms":N,"free_sram":N,"free_psram":N,"min_free_sram":N}` | 1 |
 | `wifi_scan` | `seq` | `{"resp":"wifi_scan","seq":N,"status":"started"}` (ack imediato; resultados via `stream`) | 2 |
+| `ble_scan` | `seq`, `duration_sec` (opcional, default 10, max 599; 0 = até `ble_scan_stop`) | `{"resp":"ble_scan","seq":N,"status":"started"}` | 2 |
+| `ble_scan_stop` | `seq` | `{"resp":"ble_scan_stop","seq":N,"status":"started"}` (encerra scan em andamento) | 2 |
 
 ### Erros padronizados
 
@@ -118,8 +120,9 @@ Toda resposta de erro segue o schema:
 | `bad_json` | JSON inválido / não parseável |
 | `missing_cmd` | JSON sem campo `cmd` ou tipo inválido |
 | `unknown_cmd` | Comando desconhecido (`msg` traz o cmd recebido) |
-| `scan_busy` | `wifi_scan` solicitado enquanto outro scan está rodando |
-| `scan_failed` | `esp_wifi_scan_start` retornou erro (`msg` = nome do erro) |
+| `scan_busy` | `wifi_scan`/`ble_scan` solicitado enquanto outro scan rodando |
+| `scan_failed` | API de scan retornou erro (`msg` = nome do erro) |
+| `scan_idle` | `ble_scan_stop` chamado sem scan em andamento |
 
 ### Exemplos de troca
 
@@ -151,6 +154,8 @@ Toda resposta de erro segue o schema:
 |---|---|---|---|---|
 | `0x10` | `WIFI_SCAN_AP` | device → app | 1 AP por frame, schema abaixo | 2 |
 | `0x11` | `WIFI_SCAN_DONE` | device → app | resumo final do scan | 2 |
+| `0x12` | `BLE_SCAN_DEV` | device → app | 1 device por frame (dedup por MAC) | 2 |
+| `0x13` | `BLE_SCAN_DONE` | device → app | resumo final do scan BLE | 2 |
 
 ### `0x10 WIFI_SCAN_AP` — payload
 
@@ -186,6 +191,31 @@ Toda resposta de erro segue o schema:
 | 0 | 2 | `ap_count` | uint16 BE, total de APs detectados |
 | 2 | 4 | `scan_time_ms` | uint32 BE, duração do scan em ms |
 | 6 | 1 | `status` | 0 = ok, 1 = erro (envio truncado) |
+
+### `0x12 BLE_SCAN_DEV` — payload
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `mac` | BLE address, big-endian |
+| 6 | 1 | `addr_type` | 0=public, 1=random, 2=public_id, 3=random_id |
+| 7 | 1 | `rssi` | int8, dBm |
+| 8 | 1 | `adv_flags` | uint8 (bit0=LE_LIMITED, bit1=LE_GENERAL, bit2=BR/EDR_NOT_SUPPORTED, ...) |
+| 9 | 1 | `name_len` | uint8, max 32 |
+| 10 | `name_len` | `name` | UTF-8 do nome anunciado (vazio se ausente) |
+| 10+nL | 1 | `mfg_data_len` | uint8, max 30 |
+| 11+nL | `mfg_data_len` | `mfg_data` | bytes brutos; primeiros 2 bytes = company ID little-endian (ex: `004c` = Apple, `0075` = Samsung, `00e0` = Google) |
+
+> Apenas a primeira aparição de cada MAC durante um scan é emitida (dedup
+> interno). Limite de 64 MACs únicos por scan; ao exceder, o firmware
+> emite `BLE_SCAN_DONE` com `status=1` (truncado).
+
+### `0x13 BLE_SCAN_DONE` — payload (7 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `dev_count` | uint16 BE, total de dispositivos únicos |
+| 2 | 4 | `scan_time_ms` | uint32 BE |
+| 6 | 1 | `status` | 0 = ok, 1 = limite de 64 MACs excedido, 2 = erro |
 
 > Sequência típica: app envia `wifi_scan` em `cmd_ctrl` → recebe ack →
 > recebe N frames `WIFI_SCAN_AP` em `stream` (um por AP) → recebe
@@ -296,3 +326,4 @@ Future<void> connectAndPing() async {
 | 2026-05-04 | Phase 1 | Definição inicial: service UUID, duas characteristics, frame TLV, schema JSON |
 | 2026-05-04 | Phase 1 | GATT server + comandos `ping`, `hello`, `status` operacionais; advertising como `WifiUtils-XXXX` |
 | 2026-05-04 | Phase 2 | Comando `wifi_scan` + TLV `WIFI_SCAN_AP` (0x10) e `WIFI_SCAN_DONE` (0x11); decode Dart |
+| 2026-05-04 | Phase 2 | Comandos `ble_scan` / `ble_scan_stop` + TLV `BLE_SCAN_DEV` (0x12) e `BLE_SCAN_DONE` (0x13); dedup por MAC; mfg_data |
