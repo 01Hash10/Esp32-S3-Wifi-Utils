@@ -159,6 +159,11 @@ esp_err_t scan_wifi_start_active(void)
     return scan_wifi_start(SCAN_WIFI_MODE_ACTIVE, 0);
 }
 
+bool scan_wifi_busy(void)
+{
+    return s_busy;
+}
+
 esp_err_t scan_wifi_init(scan_wifi_emit_t emit)
 {
     s_emit = emit;

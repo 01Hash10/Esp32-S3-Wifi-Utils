@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
@@ -21,3 +22,7 @@ void transport_ble_send_stream(const uint8_t *data, size_t len);
 // Reinicia o advertising do GATT (chamado por hacking_ble após spam).
 // No-op se já estiver advertising ou se houver cliente conectado.
 void transport_ble_advertising_resume(void);
+
+// Indica se há cliente BLE conectado e com pelo menos uma das characteristics
+// subscribed (cmd_ctrl OU stream).
+bool transport_ble_is_connected(void);

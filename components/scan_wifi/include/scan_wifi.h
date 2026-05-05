@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
@@ -26,3 +27,6 @@ esp_err_t scan_wifi_start(scan_wifi_mode_t mode, uint8_t channel);
 
 // Atalho legacy: scan ativo, todos os canais.
 esp_err_t scan_wifi_start_active(void);
+
+// Indica se há scan WiFi rodando.
+bool scan_wifi_busy(void);

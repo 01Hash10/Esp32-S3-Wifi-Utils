@@ -381,6 +381,9 @@ esp_err_t attack_lan_arp_throttle_stop(void)
     return ESP_OK;
 }
 
+bool attack_lan_arp_cut_busy(void)      { return !s_cut.stop; }
+bool attack_lan_arp_throttle_busy(void) { return !s_thr.stop; }
+
 // ----------------------------------------------------------------------
 // LAN host discovery (ARP scan)
 // ----------------------------------------------------------------------

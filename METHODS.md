@@ -20,6 +20,7 @@ firmware, explica:
 - [BLE GATT transport](#ble-gatt-transport-pareamentoadvertising)
 - [Comandos básicos: ping / hello / status](#comandos-basicos-ping--hello--status)
 - [Heartbeat (TLV `HEARTBEAT 0x00`)](#heartbeat--liveness-bidirecional)
+- [Status LED (WS2812)](#status_led--led-rgb-indicador-de-estado)
 
 ### Phase 2 — Scan
 - [WiFi scan ativo (`wifi_scan`)](#wifi_scan--scan-ativo-de-aps-2-4ghz)
@@ -1219,6 +1220,69 @@ App → ESP (ping a cada 10s)
 **Limitações**: só envia quando há cliente conectado (intencional). Não
 substitui supervision timeout do BLE — é camada acima. Custo: 1 timer
 ESP_TIMER + 1 notify a cada 5s (~14 bytes pelo ar) — desprezível.
+
+---
+
+## status_led — LED RGB indicador de estado
+
+**O que faz**: usa o WS2812 integrado do ESP32-S3-DevKitC-1 (GPIO 48)
+pra mostrar visualmente em qual modo o firmware está rodando. Útil pra
+diagnóstico sem precisar do app/serial.
+
+| Cor | Estado | Quando |
+|---|---|---|
+| 🔵 Azul | IDLE | Boot OK, sem cliente BLE pareado |
+| 🟣 Roxo | CONNECTED | Cliente BLE conectado e subscribed |
+| ⚪ Branco | SCAN | Scan ou sniff passivo (probe/eapol/pmkid/pcap, wifi_scan, ble_scan, lan_scan) |
+| 🟡 Amarelo | DEFENSE | Detector ativo (defense_start, ble_defense_start, watchdog) |
+| 🔴 Vermelho | ATTACK | Feature ofensiva ativa (deauth, beacon_flood, channel_jam, ble_spam, evil_twin, captive_portal, arp_cut/throttle, karma, ble_adv_flood) |
+
+**Prioridade** (highest wins, mostrado quando vários estados coexistem):
+ATTACK > DEFENSE > SCAN > CONNECTED > IDLE.
+
+Exemplo: BLE conectado + watchdog rodando + alguém disparando `deauth`
+em paralelo → vermelho (ATTACK ganha).
+
+**Como funciona**:
+- Usa o componente `espressif/led_strip` (managed dependency v2.5.x)
+  via RMT TX no GPIO 48.
+- Task de prioridade baixa (1) faz polling a cada 500ms verificando
+  busy flags dos componentes:
+  - `hacking_{wifi,ble}_busy()`, `evil_twin_busy()`,
+    `captive_portal_busy()`, `attack_lan_arp_{cut,throttle}_busy()`,
+    `sniff_wifi_mode() == KARMA` → ATTACK
+  - `watchdog_busy()`, `sniff_wifi_mode() == DEFENSE`,
+    `scan_ble_in_defense_mode()` → DEFENSE
+  - `sniff_wifi_mode()` em {PROBE, EAPOL, PMKID, PCAP}, `scan_wifi_busy()`,
+    `scan_ble_busy()`, `attack_lan_lan_scan_busy()` → SCAN
+  - `transport_ble_is_connected()` → CONNECTED
+  - else → IDLE
+- Cor só atualizada quando **muda** (evita refresh desnecessário do
+  WS2812). Latência humanamente imperceptível (500ms).
+
+**Acessores adicionados pelos componentes**:
+- `transport_ble_is_connected()`
+- `scan_wifi_busy()`
+- `scan_ble_busy()` + `scan_ble_in_defense_mode()`
+- `attack_lan_arp_{cut,throttle}_busy()`
+
+(`hacking_wifi_busy`, `hacking_ble_busy`, `evil_twin_busy`,
+`captive_portal_busy`, `watchdog_busy`, `sniff_wifi_mode`,
+`attack_lan_lan_scan_busy` já existiam.)
+
+**Cores RGB usadas** (intensidade reduzida pra não ofuscar):
+- Azul:    `(0, 0, 60)`
+- Roxo:    `(50, 0, 60)`
+- Branco:  `(60, 60, 60)`
+- Amarelo: `(80, 70, 0)`
+- Vermelho: `(100, 0, 0)`
+
+**Limitações**:
+- Polling 500ms — não é instantâneo. Pra eventos curtos (<500ms), a
+  cor pode não chegar a piscar.
+- Sem fallback se led_strip falhar inicializar — task não roda.
+- GPIO 48 é hardcoded pro DevKitC-1; outras placas podem ter LED em
+  pino diferente (precisaria menuconfig).
 
 ---
 
