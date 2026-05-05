@@ -133,6 +133,8 @@ Frame:
 | `pcap_stop` | `seq` | `{"resp":"pcap_stop","seq":N,"status":"started"}`. | 2 |
 | `karma_start` | `seq`, `channel` (1–13), `duration_sec` (opcional, 1–300, default 60) | `{"resp":"karma_start","seq":N,"status":"started"}` (ack imediato; cada (mac, ssid) único via TLV `KARMA_HIT`, fim via `KARMA_DONE`). **Requer ESP NÃO conectado**. ESP escuta probe req direcionados e responde com probe response forjado — devices que tinham o SSID na PNL podem tentar associar. | 3 |
 | `karma_stop` | `seq` | `{"resp":"karma_stop","seq":N,"status":"started"}`. | 3 |
+| `defense_start` | `seq`, `mask` (bitmask 1=deauth, 2=beacon_flood, 4=evil_twin, 8=karma; default 15=all), `channel` (0=hop, 1–13=fixo), `ch_min`/`ch_max` (1–13, só se hop), `dwell_ms` (100–5000, só se hop), `duration_sec` (0=até stop, max 3600) | `{"resp":"defense_start","seq":N,"status":"started"}` (ack imediato; alerts via TLVs `0x30..0x33`, fim via `0x34`). **Requer ESP NÃO conectado**. Detectores rodam em paralelo no mesmo loop promiscuous. | 5 |
+| `defense_stop` | `seq` | `{"resp":"defense_stop","seq":N,"status":"started"}`. | 5 |
 | `evil_twin_start` | `seq`, `ssid` (1–32 chars), `password` (opcional, 8–63 chars; vazio/ausente = open), `channel` (1–13), `max_conn` (opcional, 1–10, default 4) | `{"resp":"evil_twin_start","seq":N,"status":"started","ssid":"...","channel":N,"auth":"open"\|"wpa2"}`. **Requer ESP NÃO conectado**. Cada client que associa emite TLV `EVIL_CLIENT_JOIN`; cada disconnect emite `EVIL_CLIENT_LEAVE`. DHCP automático (default 192.168.4.x). | 3 |
 | `evil_twin_stop` | `seq` | `{"resp":"evil_twin_stop","seq":N,"status":"started"}`. Encerra o AP e volta pra STA-only. | 3 |
 | `captive_portal_start` | `seq`, `html` (opcional, página HTML servida; default = formulário login simples), `redirect_ip` (opcional, default `192.168.4.1`) | `{"resp":"captive_portal_start","seq":N,"status":"started","redirect_ip":"x.x.x.x"}`. **Requer `evil_twin` ativo**. Sobe DNS:53 (responde tudo com `redirect_ip`) + HTTP:80 (serve HTML). Cada query DNS emite TLV `PORTAL_DNS_QUERY`; cada HTTP request emite `PORTAL_HTTP_REQ` (até ~130B do body — pega POST de form com credenciais). | 3 |
@@ -230,6 +232,11 @@ Toda resposta de erro segue o schema:
 | `0x2D` | `PORTAL_DNS_QUERY` | device → app | DNS query recebida pelo captive portal (src_ip + domínio) | 3 |
 | `0x2E` | `PORTAL_HTTP_REQ` | device → app | HTTP request (src_ip + method + path + body chunk) | 3 |
 | `0x2F` | `BLE_FLOOD_DONE` | device → app | resumo final do `ble_adv_flood` (sent + duration_sec) | 4 |
+| `0x30` | `DEFENSE_DEAUTH` | device → app | alerta: storm de deauth/disassoc detectado | 5 |
+| `0x31` | `DEFENSE_BEACON_FLOOD` | device → app | alerta: muitos BSSIDs únicos/sec (beacon flood) | 5 |
+| `0x32` | `DEFENSE_EVIL_TWIN` | device → app | alerta: mesmo SSID com 2 BSSIDs distintos | 5 |
+| `0x33` | `DEFENSE_KARMA` | device → app | alerta: BSSID com prefix locally-administered (suspeita Karma) | 5 |
+| `0x34` | `DEFENSE_DONE` | device → app | resumo final do `defense_start` | 5 |
 | `0x40` | `PCAP_FRAME` | device → app | 1 frame 802.11 capturado pelo `pcap_start`, com timestamp relativo | 2 |
 | `0x41` | `PCAP_DONE` | device → app | resumo final do `pcap_start` (emitted/dropped/elapsed) | 2 |
 
@@ -562,6 +569,57 @@ Toda resposta de erro segue o schema:
 > que o BLE consegue transmitir. Estratégias: filtrar mais (`mgmt` só) ou
 > usar `bssid` pra reduzir volume.
 
+### `0x30 DEFENSE_DEAUTH` — payload (10 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `bssid` | BSSID alvo (atualmente `ff:ff:ff:ff:ff:ff` = "qualquer" — futuro pode discriminar) |
+| 6 | 2 | `count` | uint16 BE, deauth/disassoc no último window |
+| 8 | 2 | `window_ms` | uint16 BE, tamanho da janela (default 1000) |
+
+> Threshold default: 5 frames/segundo. Cooldown de 3s entre alertas
+> consecutivos do mesmo tipo.
+
+### `0x31 DEFENSE_BEACON_FLOOD` — payload (6 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `unique_count` | uint16 BE, BSSIDs únicos no window |
+| 2 | 2 | `window_ms` | uint16 BE |
+| 4 | 2 | `total_beacons` | uint16 BE, total acumulado desde start |
+
+> Threshold default: 20 BSSIDs únicos/segundo (ambient normal: 5–15).
+
+### `0x32 DEFENSE_EVIL_TWIN` — payload (variável, 16..47 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 1 | `ssid_len` | uint8, 1..32 |
+| 1 | `ssid_len` | `ssid` | UTF-8 |
+| 1+sL | 6 | `bssid_a` | primeiro BSSID visto pra esse SSID |
+| 7+sL | 1 | `rssi_a` | int8, dBm |
+| 8+sL | 6 | `bssid_b` | segundo BSSID (suspeito) |
+| 14+sL | 1 | `rssi_b` | int8 |
+
+### `0x33 DEFENSE_KARMA` — payload (variável, 8..40 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `bssid` | BSSID com bit locally-administered setado |
+| 6 | 1 | `rssi` | int8 |
+| 7 | 1 | `ssid_len` | uint8 |
+| 8 | `ssid_len` | `ssid` | UTF-8 |
+
+### `0x34 DEFENSE_DONE` — payload (15 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `alerts` | uint16 BE, total de alertas emitidos |
+| 2 | 4 | `total_deauth` | uint32 BE |
+| 6 | 4 | `total_beacons` | uint32 BE |
+| 10 | 4 | `elapsed_ms` | uint32 BE |
+| 14 | 1 | `status` | 0 = ok, 2 = erro |
+
 ### Faixas reservadas de `msg_type`
 
 | Faixa | Categoria |
@@ -688,3 +746,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3 | Comando `wps_pin_test`: testa 1 PIN WPS contra um BSSID via supplicant do IDF (modo enrollee). Emite TLV `WPS_TEST_DONE 0x2C` com status + (em sucesso) SSID + PSK descobertos. Pixie Dust nativo marcado [blocked - lib limitation]: API IDF não expõe M2 cru; workaround = `pcap_start` + `pixiewps` offline. |
 | 2026-05-05 | Phase 3 | Comandos `captive_portal_start` / `captive_portal_stop`: complementa `evil_twin` com DNS hijack (UDP:53 redireciona tudo pro AP) + HTTP server (TCP:80 serve HTML configurável). Cada DNS query → TLV `PORTAL_DNS_QUERY 0x2D`; cada HTTP req → TLV `PORTAL_HTTP_REQ 0x2E` com body chunk de até 130B (captura POST forms com credenciais). |
 | 2026-05-05 | Phase 4 | Comando `ble_adv_flood`: DoS via channel congestion. Loop tight de adv com payload random + interval mínimo (20ms × 3 canais ≈ 75 PDUs/s). Novo TLV `BLE_FLOOD_DONE 0x2F`. Cap duration 60s pra não fritar. Active scan abuse: já coberto pelo `ble_scan mode=active` (Phase 2). |
+| 2026-05-05 | Phase 5 | Comandos `defense_start` / `defense_stop`: 4 detectores em paralelo (deauth storm / beacon flood / evil twin / karma) via promiscuous mgmt. Novos TLVs `DEFENSE_DEAUTH 0x30`, `DEFENSE_BEACON_FLOOD 0x31`, `DEFENSE_EVIL_TWIN 0x32`, `DEFENSE_KARMA 0x33`, `DEFENSE_DONE 0x34`. Cooldown de 3s entre alertas do mesmo tipo. Channel hop opcional. Cap 1h. Faixa 0x30–0x3F (defense events) inaugurada. |

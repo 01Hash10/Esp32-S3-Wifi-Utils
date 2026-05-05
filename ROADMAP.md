@@ -164,14 +164,14 @@ ou removidos ao longo do projeto.
 
 ## Phase 5 — Defense (Detection-only)
 
-- [ ] Deauth detector + alerta no app
-- [ ] Evil twin detector (mesmo SSID, BSSID diferente / RSSI suspeito)
-- [ ] Beacon flood detector
-- [ ] BLE spam detector (matcher de assinaturas conhecidas)
-- [ ] Tracker following detector (BLE)
-- [ ] WiFi Pineapple / Karma detector
-- [ ] PMKID exposure scanner (sua própria rede)
-- [ ] Histórico de eventos persistente (ring buffer + NVS)
+- [x] Deauth detector + alerta no app — `defense_start` com `mask & 0x01`, threshold 5/s, TLV `DEFENSE_DEAUTH 0x30`
+- [x] Evil twin detector — `mask & 0x04`, mesmo SSID com 2+ BSSIDs distintos, TLV `DEFENSE_EVIL_TWIN 0x32`
+- [x] Beacon flood detector — `mask & 0x02`, threshold 20 BSSIDs únicos/s, TLV `DEFENSE_BEACON_FLOOD 0x31`
+- [ ] BLE spam detector (matcher de assinaturas conhecidas) — futuro
+- [ ] Tracker following detector (BLE) — agregação multi-scan, marcado lado-app na Phase 2
+- [x] WiFi Pineapple / Karma detector — `mask & 0x08`, BSSID com bit locally-admin, TLV `DEFENSE_KARMA 0x33`
+- [ ] PMKID exposure scanner (sua própria rede) — pode reusar `pmkid_capture` apontado pra próprio AP
+- [ ] Histórico de eventos persistente (ring buffer + NVS) — bloqueado pela Phase 7
 
 ## Phase 6 — Defense (Active counter-measures)
 

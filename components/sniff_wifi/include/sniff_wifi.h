@@ -15,7 +15,15 @@ typedef enum {
     SNIFF_MODE_PMKID = 3,
     SNIFF_MODE_PCAP  = 4,
     SNIFF_MODE_KARMA = 5,
+    SNIFF_MODE_DEFENSE = 6,
 } sniff_mode_t;
+
+// Bitmask de detectores no modo DEFENSE
+#define DEFENSE_DETECT_DEAUTH        0x01
+#define DEFENSE_DETECT_BEACON_FLOOD  0x02
+#define DEFENSE_DETECT_EVIL_TWIN     0x04
+#define DEFENSE_DETECT_KARMA         0x08
+#define DEFENSE_DETECT_ALL           0x0F
 
 // Bitmask para filtro do pcap_start.
 #define SNIFF_PCAP_FILTER_MGMT  0x01
@@ -87,6 +95,23 @@ esp_err_t sniff_wifi_pcap_stop(void);
 esp_err_t sniff_wifi_karma_start(uint8_t channel, uint16_t duration_sec);
 
 esp_err_t sniff_wifi_karma_stop(void);
+
+// Defense monitor: roda 1+ detectores (deauth/beacon_flood/evil_twin/karma)
+// em paralelo num canal fixo OU com hop. Cada detector emite TLVs próprios
+// (faixa 0x30) quando crusa threshold. Final: TLV_MSG_DEFENSE_DONE.
+//
+// @param mask           bitmask DEFENSE_DETECT_* (pelo menos 1 bit)
+// @param channel        0 = hop em ch_min..ch_max; >0 = canal fixo
+// @param ch_min/ch_max  só se channel=0 (1..13)
+// @param dwell_ms       só se hop (100..5000, default 500)
+// @param duration_sec   1..3600, 0 = roda até `_stop` (cap 1h)
+esp_err_t sniff_wifi_defense_start(uint8_t mask,
+                                    uint8_t channel,
+                                    uint8_t ch_min, uint8_t ch_max,
+                                    uint16_t dwell_ms,
+                                    uint16_t duration_sec);
+
+esp_err_t sniff_wifi_defense_stop(void);
 
 bool sniff_wifi_busy(void);
 sniff_mode_t sniff_wifi_mode(void);

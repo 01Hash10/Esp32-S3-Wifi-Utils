@@ -57,6 +57,13 @@ typedef enum {
     TLV_MSG_PORTAL_HTTP_REQ    = 0x2E,
     TLV_MSG_BLE_FLOOD_DONE     = 0x2F,
 
+    // Defense events (0x30–0x3F)
+    TLV_MSG_DEFENSE_DEAUTH       = 0x30,
+    TLV_MSG_DEFENSE_BEACON_FLOOD = 0x31,
+    TLV_MSG_DEFENSE_EVIL_TWIN    = 0x32,
+    TLV_MSG_DEFENSE_KARMA        = 0x33,
+    TLV_MSG_DEFENSE_DONE         = 0x34,
+
     // Captura/dados (0x40–0x4F): streaming de pcap chunks.
     TLV_MSG_PCAP_FRAME         = 0x40,
     TLV_MSG_PCAP_DONE          = 0x41,

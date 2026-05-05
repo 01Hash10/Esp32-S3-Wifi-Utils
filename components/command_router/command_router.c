@@ -538,6 +538,62 @@ static void handle_karma_stop(cJSON *root)
     }
 }
 
+static void handle_defense_start(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (attack_lan_is_connected()) {
+        send_err(seq, "wifi_busy", "disconnect first");
+        return;
+    }
+
+    cJSON *mask_j  = cJSON_GetObjectItemCaseSensitive(root, "mask");
+    cJSON *ch_j    = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *cmin_j  = cJSON_GetObjectItemCaseSensitive(root, "ch_min");
+    cJSON *cmax_j  = cJSON_GetObjectItemCaseSensitive(root, "ch_max");
+    cJSON *dw_j    = cJSON_GetObjectItemCaseSensitive(root, "dwell_ms");
+    cJSON *dur_j   = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+
+    int mask_val = cJSON_IsNumber(mask_j) ? mask_j->valueint : DEFENSE_DETECT_ALL;
+    if (mask_val < 1 || mask_val > 0x0F) {
+        send_err(seq, "bad_mask", "1..15 (bitmask)");
+        return;
+    }
+    int ch = cJSON_IsNumber(ch_j) ? ch_j->valueint : 0;
+    if (ch < 0 || ch > 13) { send_err(seq, "bad_channel", NULL); return; }
+
+    int cmin = cJSON_IsNumber(cmin_j) ? cmin_j->valueint : 1;
+    int cmax = cJSON_IsNumber(cmax_j) ? cmax_j->valueint : 13;
+    int dw   = cJSON_IsNumber(dw_j)   ? dw_j->valueint   : 500;
+    int dur  = cJSON_IsNumber(dur_j)  ? dur_j->valueint  : 60;
+    if (dur < 0)    dur = 0;     // 0 = sem timeout (até 1h cap interno)
+    if (dur > 3600) dur = 3600;
+
+    esp_err_t err = sniff_wifi_defense_start(
+        (uint8_t)mask_val, (uint8_t)ch,
+        (uint8_t)cmin, (uint8_t)cmax,
+        (uint16_t)dw, (uint16_t)dur);
+    if (err == ESP_OK) {
+        send_ack(seq, "defense_start");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "sniff_busy", NULL);
+    } else if (err == ESP_ERR_INVALID_ARG) {
+        send_err(seq, "bad_args", NULL);
+    } else {
+        send_err(seq, "sniff_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_defense_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = sniff_wifi_defense_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "defense_stop");
+    } else {
+        send_err(seq, "sniff_idle", NULL);
+    }
+}
+
 static void handle_evil_twin_start(cJSON *root)
 {
     int seq = seq_of(root);
@@ -1066,6 +1122,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_karma_start(root);
     } else if (strcmp(c, "karma_stop") == 0) {
         handle_karma_stop(root);
+    } else if (strcmp(c, "defense_start") == 0) {
+        handle_defense_start(root);
+    } else if (strcmp(c, "defense_stop") == 0) {
+        handle_defense_stop(root);
     } else if (strcmp(c, "evil_twin_start") == 0) {
         handle_evil_twin_start(root);
     } else if (strcmp(c, "evil_twin_stop") == 0) {

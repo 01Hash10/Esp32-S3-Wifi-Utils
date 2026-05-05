@@ -1190,3 +1190,402 @@ esp_err_t sniff_wifi_karma_stop(void)
     s_stop = true;
     return ESP_OK;
 }
+
+// ----------------------------------------------------------------------
+// Defense monitor — detectores deauth, beacon_flood, evil_twin, karma
+// ----------------------------------------------------------------------
+
+#define DEF_BSSID_SET_CAP    64
+#define DEF_SSID_TABLE_CAP   32
+#define DEF_DEAUTH_THRESHOLD 5     // frames/s pra disparar alerta
+#define DEF_FLOOD_THRESHOLD  20    // unique BSSIDs/s
+#define DEF_WINDOW_MS        1000  // janela deslizante de 1s
+#define DEF_ALERT_COOLDOWN_MS 3000 // não spammar mesmo alerta
+
+typedef struct {
+    char ssid[33];
+    uint8_t ssid_len;
+    uint8_t bssid_a[6];   // primeiro BSSID visto
+    int8_t  rssi_a;
+    uint8_t bssid_b[6];   // segundo (se houver)
+    int8_t  rssi_b;
+    bool    has_b;
+    bool    alerted;
+} ssid_entry_t;
+
+typedef struct {
+    uint8_t  mask;
+    uint8_t  channel;     // 0 = hop
+    uint8_t  ch_min, ch_max;
+    uint16_t dwell_ms;
+    uint16_t duration_sec;
+} defense_ctx_t;
+
+// Estado defense (acessado tanto na promisc CB quanto na controller task)
+static volatile uint8_t s_def_mask = 0;
+static volatile uint16_t s_def_deauth_count = 0;
+static volatile uint16_t s_def_beacon_count = 0;
+
+// Sets/tables — modificados na CB (single producer) e lidos na task
+static uint8_t s_def_bssid_set[DEF_BSSID_SET_CAP][6];
+static volatile size_t s_def_bssid_count = 0;
+static ssid_entry_t s_def_ssids[DEF_SSID_TABLE_CAP];
+static volatile size_t s_def_ssid_count = 0;
+
+// Cooldown timestamps por tipo (last alert µs)
+static int64_t s_def_last_alert_us[4] = {0};
+
+// Contadores totais pro DONE final
+static uint32_t s_def_total_deauth = 0;
+static uint32_t s_def_total_beacons = 0;
+static uint16_t s_def_total_alerts = 0;
+
+static void emit_defense_deauth(const uint8_t bssid[6], uint16_t count, uint16_t window_ms)
+{
+    uint8_t payload[10];
+    memcpy(&payload[0], bssid, 6);
+    payload[6] = (uint8_t)(count >> 8);   payload[7] = (uint8_t)(count & 0xFF);
+    payload[8] = (uint8_t)(window_ms >> 8); payload[9] = (uint8_t)(window_ms & 0xFF);
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_DEFENSE_DEAUTH, s_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void emit_defense_beacon_flood(uint16_t unique_count, uint16_t window_ms,
+                                       uint16_t total_beacons)
+{
+    uint8_t payload[6];
+    payload[0] = (uint8_t)(unique_count >> 8); payload[1] = (uint8_t)(unique_count & 0xFF);
+    payload[2] = (uint8_t)(window_ms >> 8);    payload[3] = (uint8_t)(window_ms & 0xFF);
+    payload[4] = (uint8_t)(total_beacons >> 8);payload[5] = (uint8_t)(total_beacons & 0xFF);
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_DEFENSE_BEACON_FLOOD, s_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void emit_defense_evil_twin(const ssid_entry_t *e)
+{
+    uint8_t payload[1 + 33 + 6 + 1 + 6 + 1];
+    size_t off = 0;
+    payload[off++] = e->ssid_len;
+    memcpy(&payload[off], e->ssid, e->ssid_len); off += e->ssid_len;
+    memcpy(&payload[off], e->bssid_a, 6); off += 6;
+    payload[off++] = (uint8_t)e->rssi_a;
+    memcpy(&payload[off], e->bssid_b, 6); off += 6;
+    payload[off++] = (uint8_t)e->rssi_b;
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_DEFENSE_EVIL_TWIN, s_seq++,
+                           payload, off);
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void emit_defense_karma(const uint8_t bssid[6], int8_t rssi,
+                                const uint8_t *ssid, uint8_t ssid_len)
+{
+    uint8_t payload[8 + 33];
+    memcpy(&payload[0], bssid, 6);
+    payload[6] = (uint8_t)rssi;
+    payload[7] = ssid_len;
+    if (ssid_len) memcpy(&payload[8], ssid, ssid_len);
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_DEFENSE_KARMA, s_seq++,
+                           payload, 8 + ssid_len);
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void emit_defense_done(uint16_t alerts, uint32_t total_deauth,
+                                uint32_t total_beacons, uint32_t elapsed_ms,
+                                uint8_t status)
+{
+    uint8_t payload[15];
+    payload[0]  = (uint8_t)(alerts >> 8);        payload[1] = (uint8_t)(alerts & 0xFF);
+    payload[2]  = (uint8_t)(total_deauth >> 24); payload[3] = (uint8_t)(total_deauth >> 16);
+    payload[4]  = (uint8_t)(total_deauth >> 8);  payload[5] = (uint8_t)(total_deauth & 0xFF);
+    payload[6]  = (uint8_t)(total_beacons >> 24);payload[7] = (uint8_t)(total_beacons >> 16);
+    payload[8]  = (uint8_t)(total_beacons >> 8); payload[9] = (uint8_t)(total_beacons & 0xFF);
+    payload[10] = (uint8_t)(elapsed_ms >> 24);   payload[11] = (uint8_t)(elapsed_ms >> 16);
+    payload[12] = (uint8_t)(elapsed_ms >> 8);    payload[13] = (uint8_t)(elapsed_ms & 0xFF);
+    payload[14] = status;
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_DEFENSE_DONE, s_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+// Verifica se BSSID já está no set; se não, adiciona. Retorna true se NOVO.
+static bool def_bssid_set_add(const uint8_t bssid[6])
+{
+    for (size_t i = 0; i < s_def_bssid_count; i++) {
+        if (memcmp(s_def_bssid_set[i], bssid, 6) == 0) return false;
+    }
+    if (s_def_bssid_count >= DEF_BSSID_SET_CAP) return false;
+    memcpy(s_def_bssid_set[s_def_bssid_count++], bssid, 6);
+    return true;
+}
+
+// Procura SSID na tabela. Retorna ptr ou NULL. Se não achar, cria entry.
+static ssid_entry_t *def_ssid_find_or_add(const uint8_t *ssid, uint8_t ssid_len)
+{
+    for (size_t i = 0; i < s_def_ssid_count; i++) {
+        if (s_def_ssids[i].ssid_len == ssid_len &&
+            memcmp(s_def_ssids[i].ssid, ssid, ssid_len) == 0) {
+            return &s_def_ssids[i];
+        }
+    }
+    if (s_def_ssid_count >= DEF_SSID_TABLE_CAP) return NULL;
+    ssid_entry_t *e = &s_def_ssids[s_def_ssid_count++];
+    memset(e, 0, sizeof(*e));
+    memcpy(e->ssid, ssid, ssid_len);
+    e->ssid_len = ssid_len;
+    return e;
+}
+
+// Cooldown: se passou X ms desde último alerta deste tipo, autoriza emit.
+// Retorna true se autorizado (e atualiza timestamp).
+static bool def_alert_authorized(int idx)
+{
+    int64_t now = esp_timer_get_time();
+    if (now - s_def_last_alert_us[idx] < (int64_t)DEF_ALERT_COOLDOWN_MS * 1000) {
+        return false;
+    }
+    s_def_last_alert_us[idx] = now;
+    return true;
+}
+
+static void promisc_cb_defense(void *buf, wifi_promiscuous_pkt_type_t type)
+{
+    if (type != WIFI_PKT_MGMT) return;
+    const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
+    const uint8_t *p = pkt->payload;
+    uint16_t len = pkt->rx_ctrl.sig_len;
+    if (len < 24 + 4) return;
+
+    uint8_t fc0 = p[0];
+    int8_t rssi = pkt->rx_ctrl.rssi;
+
+    // Deauth (0xC0) ou Disassoc (0xA0)
+    if ((s_def_mask & DEFENSE_DETECT_DEAUTH) &&
+        (fc0 == 0xC0 || fc0 == 0xA0)) {
+        s_def_deauth_count++;
+        s_def_total_deauth++;
+        return;
+    }
+
+    // Beacon (0x80) ou Probe Resp (0x50): disparam evil_twin / karma /
+    // beacon_flood
+    if (fc0 != 0x80 && fc0 != 0x50) return;
+
+    s_def_total_beacons++;
+
+    const uint8_t *bssid = &p[16]; // addr3 in mgmt = BSSID
+    if (s_def_mask & DEFENSE_DETECT_BEACON_FLOOD) {
+        if (def_bssid_set_add(bssid)) {
+            s_def_beacon_count = (uint16_t)s_def_bssid_count;
+        }
+    }
+
+    // Parse SSID IE (offset 36 do beacon body: 24 hdr + 12 fixed body)
+    if (!(s_def_mask & (DEFENSE_DETECT_EVIL_TWIN | DEFENSE_DETECT_KARMA))) return;
+    if (len < 24 + 12 + 2 + 4) return;
+    const uint8_t *ies = &p[24 + 12];
+    uint16_t ies_len = len - (24 + 12) - 4; // -FCS
+    if (ies_len < 2) return;
+    if (ies[0] != 0x00) return;
+    uint8_t ssid_len = ies[1];
+    if (ssid_len == 0 || ssid_len > 32) return;
+    if (2 + ssid_len > ies_len) return;
+    const uint8_t *ssid = &ies[2];
+
+    // Karma detector: BSSID com bit "locally administered" setado é
+    // suspeito (real APs usam OUIs públicos da IEEE).
+    if (s_def_mask & DEFENSE_DETECT_KARMA) {
+        if ((bssid[0] & 0x02) && def_alert_authorized(3)) {
+            s_def_total_alerts++;
+            uint8_t bssid_copy[6]; memcpy(bssid_copy, bssid, 6);
+            uint8_t ssid_copy[33]; memcpy(ssid_copy, ssid, ssid_len);
+            emit_defense_karma(bssid_copy, rssi, ssid_copy, ssid_len);
+        }
+    }
+
+    // Evil twin: track SSID → BSSIDs distintos
+    if (s_def_mask & DEFENSE_DETECT_EVIL_TWIN) {
+        ssid_entry_t *e = def_ssid_find_or_add(ssid, ssid_len);
+        if (!e) return;
+        if (e->bssid_a[0] == 0 && e->bssid_a[1] == 0 && e->bssid_a[2] == 0 &&
+            e->bssid_a[3] == 0 && e->bssid_a[4] == 0 && e->bssid_a[5] == 0) {
+            // primeiro BSSID
+            memcpy(e->bssid_a, bssid, 6);
+            e->rssi_a = rssi;
+        } else if (memcmp(e->bssid_a, bssid, 6) != 0 && !e->has_b) {
+            // 2º BSSID diferente — possível evil twin
+            memcpy(e->bssid_b, bssid, 6);
+            e->rssi_b = rssi;
+            e->has_b = true;
+            if (!e->alerted && def_alert_authorized(2)) {
+                s_def_total_alerts++;
+                e->alerted = true;
+                emit_defense_evil_twin(e);
+            }
+        }
+    }
+}
+
+static void defense_task(void *arg)
+{
+    defense_ctx_t *ctx = (defense_ctx_t *)arg;
+    int64_t start_us = esp_timer_get_time();
+    int64_t deadline_us = ctx->duration_sec
+        ? start_us + (int64_t)ctx->duration_sec * 1000000LL
+        : start_us + (int64_t)3600 * 1000000LL; // cap 1h se duration=0
+
+    s_def_mask = ctx->mask;
+    s_def_deauth_count = 0;
+    s_def_beacon_count = 0;
+    s_def_bssid_count = 0;
+    s_def_ssid_count = 0;
+    s_def_total_deauth = 0;
+    s_def_total_beacons = 0;
+    s_def_total_alerts = 0;
+    memset(s_def_last_alert_us, 0, sizeof(s_def_last_alert_us));
+
+    wifi_promiscuous_filter_t filter = {
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT,
+    };
+    esp_wifi_set_promiscuous_filter(&filter);
+
+    esp_err_t err = esp_wifi_set_promiscuous(true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set_promiscuous rc=%s", esp_err_to_name(err));
+        emit_defense_done(0, 0, 0, 0, 2);
+        goto cleanup;
+    }
+    esp_wifi_set_promiscuous_rx_cb(&promisc_cb_defense);
+
+    bool hop = (ctx->channel == 0);
+    uint8_t ch = hop ? ctx->ch_min : ctx->channel;
+    if (!hop) esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+
+    int64_t window_start_us = esp_timer_get_time();
+    int64_t hop_until_us = window_start_us + (hop ? ctx->dwell_ms * 1000 : INT64_MAX/2);
+    if (hop) esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+
+    while (!s_stop && esp_timer_get_time() < deadline_us) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+        int64_t now = esp_timer_get_time();
+
+        // Channel hop tick
+        if (hop && now >= hop_until_us) {
+            ch = (ch >= ctx->ch_max) ? ctx->ch_min : (ch + 1);
+            esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+            hop_until_us = now + ctx->dwell_ms * 1000;
+        }
+
+        // Janela de 1s — checa thresholds e reseta
+        if (now - window_start_us >= (int64_t)DEF_WINDOW_MS * 1000) {
+            uint16_t da = s_def_deauth_count;
+            uint16_t un = s_def_beacon_count;
+
+            if ((s_def_mask & DEFENSE_DETECT_DEAUTH) && da >= DEF_DEAUTH_THRESHOLD) {
+                if (def_alert_authorized(0)) {
+                    s_def_total_alerts++;
+                    // BSSID alvo: o último visto não é representativo;
+                    // emit broadcast (ff..ff) — app pode correlacionar com pcap.
+                    uint8_t any[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+                    emit_defense_deauth(any, da, DEF_WINDOW_MS);
+                }
+            }
+            if ((s_def_mask & DEFENSE_DETECT_BEACON_FLOOD) && un >= DEF_FLOOD_THRESHOLD) {
+                if (def_alert_authorized(1)) {
+                    s_def_total_alerts++;
+                    emit_defense_beacon_flood(un, DEF_WINDOW_MS, s_def_total_beacons);
+                }
+            }
+
+            // Reset window
+            s_def_deauth_count = 0;
+            s_def_beacon_count = 0;
+            s_def_bssid_count = 0;
+            window_start_us = now;
+        }
+    }
+
+    esp_wifi_set_promiscuous(false);
+
+    uint32_t elapsed = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+    emit_defense_done(s_def_total_alerts, s_def_total_deauth,
+                      s_def_total_beacons, elapsed, 0);
+    ESP_LOGI(TAG, "defense done: %u alerts, %lu deauth, %lu beacons in %u ms",
+             (unsigned)s_def_total_alerts,
+             (unsigned long)s_def_total_deauth,
+             (unsigned long)s_def_total_beacons,
+             (unsigned)elapsed);
+
+cleanup:
+    free(ctx);
+    s_stop = false;
+    s_task = NULL;
+    s_mode = SNIFF_MODE_IDLE;
+    vTaskDelete(NULL);
+}
+
+esp_err_t sniff_wifi_defense_start(uint8_t mask,
+                                    uint8_t channel,
+                                    uint8_t ch_min, uint8_t ch_max,
+                                    uint16_t dwell_ms,
+                                    uint16_t duration_sec)
+{
+    if (s_mode != SNIFF_MODE_IDLE) return ESP_ERR_INVALID_STATE;
+    if ((mask & DEFENSE_DETECT_ALL) == 0) return ESP_ERR_INVALID_ARG;
+
+    if (channel == 0) {
+        // hop mode
+        if (ch_min == 0 || ch_min > 13) ch_min = 1;
+        if (ch_max == 0 || ch_max > 13) ch_max = 13;
+        if (ch_max < ch_min) return ESP_ERR_INVALID_ARG;
+        if (dwell_ms < 100) dwell_ms = 100;
+        if (dwell_ms > 5000) dwell_ms = 5000;
+    } else {
+        if (channel > 13) return ESP_ERR_INVALID_ARG;
+    }
+    if (duration_sec > 3600) duration_sec = 3600;
+
+    defense_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return ESP_ERR_NO_MEM;
+    ctx->mask = mask & DEFENSE_DETECT_ALL;
+    ctx->channel = channel;
+    ctx->ch_min = ch_min;
+    ctx->ch_max = ch_max;
+    ctx->dwell_ms = dwell_ms;
+    ctx->duration_sec = duration_sec;
+
+    s_mode = SNIFF_MODE_DEFENSE;
+    s_stop = false;
+    if (xTaskCreate(defense_task, "defense", 4096, ctx, 5, &s_task) != pdPASS) {
+        free(ctx);
+        s_mode = SNIFF_MODE_IDLE;
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "defense started: mask=0x%02x ch=%u (%u..%u) dwell=%ums dur=%us",
+             mask, channel, ch_min, ch_max, (unsigned)dwell_ms,
+             (unsigned)duration_sec);
+    return ESP_OK;
+}
+
+esp_err_t sniff_wifi_defense_stop(void)
+{
+    if (s_mode != SNIFF_MODE_DEFENSE) return ESP_ERR_INVALID_STATE;
+    s_stop = true;
+    return ESP_OK;
+}

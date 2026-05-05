@@ -42,6 +42,9 @@ firmware, explica:
 - [WPS PIN test (`wps_pin_test`)](#wps_pin_test--testa-1-pin-wps-pixie-dust-blocked)
 - [Captive Portal (`captive_portal_start`)](#captive_portal_start--dns-hijack--http-server)
 
+### Phase 5 — Defense (Detection-only)
+- [Defense WiFi monitor (`defense_start`)](#defense_start--detectores-deauth--beacon-flood--evil-twin--karma)
+
 ### `pcap_start` — streaming de frames 802.11 via BLE
 
 **O que faz**: captura frames 802.11 num canal fixo e os envia em
@@ -454,6 +457,92 @@ ESP ──ack started──→ App
 **Combinação natural**:
 - `evil_twin_start(ssid)` + `captive_portal_start(html)` — twin + portal.
 - Em paralelo: `deauth(legit_bssid)` força clientes a migrarem.
+
+---
+
+## `defense_start` — detectores deauth / beacon flood / evil twin / karma
+
+**O que faz**: monitor passivo (promiscuous mgmt) que roda 4 detectores
+em paralelo via bitmask:
+
+| Bit | Detector | Heurística | TLV emitido |
+|---|---|---|---|
+| 0 | Deauth storm | ≥ 5 frames deauth/disassoc por segundo | `0x30 DEFENSE_DEAUTH` |
+| 1 | Beacon flood | ≥ 20 BSSIDs únicos por segundo | `0x31 DEFENSE_BEACON_FLOOD` |
+| 2 | Evil twin | mesmo SSID com 2 BSSIDs distintos | `0x32 DEFENSE_EVIL_TWIN` |
+| 3 | Karma / Pineapple | beacon/probe response com BSSID locally-administered (bit `0x02` no byte 0) | `0x33 DEFENSE_KARMA` |
+
+Cooldown global de 3s por tipo de alerta — evita inundar o app durante
+um ataque ativo.
+
+**Como funciona** (heurísticas):
+
+- **Deauth storm**: contador per-segundo. Ambient normal: 0 deauths.
+  Mais que ~5/s indica ataque ou misconfiguração. Real-world tools
+  (mdk4, aireplay-ng) emitem 50–200/s.
+- **Beacon flood**: contador de BSSIDs únicos com set de 64 entries
+  resetado a cada janela. Ambient: 5–15 APs. > 20 indica flood
+  (nosso `beacon_flood` cospe ~30+).
+- **Evil twin**: tabela SSID→{primeiro BSSID, segundo BSSID se ≠ primeiro}.
+  Quando vê o 2º distinto pra um SSID, alerta. Funciona ambivalentemente
+  (legítimo: AP roaming entre 2 rádios; suspeito: nosso `evil_twin` ou
+  outro fake). App pode filtrar por OUI / locally-admin.
+- **Karma / Pineapple**: BSSID com bit `0x02` setado no byte 0 (locally
+  administered) é forte indício de BSSID fake. Roteadores reais usam
+  OUI da IEEE (bit limpo). Hak5 Pineapple e nosso `karma_make_bssid`
+  ambos usam locally-admin → detectados.
+
+**Implementação** (`sniff_wifi.c`, modo DEFENSE):
+- Promisc filter MGMT.
+- promisc_cb_defense:
+  - FC 0xC0/0xA0 → incrementa deauth counter.
+  - FC 0x80/0x50 → incrementa beacon counter, parse SSID, atualiza
+    tabelas evil_twin/karma. Locally-admin check inline.
+- Controller task com sleep 200ms. A cada 1000ms acumulado:
+  - Checa thresholds → emit alerts (com cooldown 3s).
+  - Reseta janelas (deauth_count, beacon_count, bssid set).
+- Channel hop opcional: `channel=0` + `ch_min..ch_max` + `dwell_ms`.
+  Útil pra cobertura full 2.4GHz; trade-off é perder eventos no canal
+  ativo enquanto está em outros.
+- Final: TLV `DEFENSE_DONE 0x34` com counters totais + alerts emitidos.
+
+**Fluxo**:
+```
+App ──{"cmd":"defense_start","mask":15,"channel":0,"duration_sec":300}──→ ESP
+ESP ──ack started──→ App
+
+  promisc_cb (continuamente):
+    deauth (0xC0) → contador++
+    beacon (0x80) com SSID="..." e BSSID locally-admin → emit DEFENSE_KARMA
+    beacon SSID="X" BSSID=AA:.. → tabela["X"]={a:AA:..}
+    beacon SSID="X" BSSID=BB:.. → tabela["X"]={b:BB:..} → emit DEFENSE_EVIL_TWIN
+  
+  controller_task (a cada 1s):
+    if deauth_count >= 5: emit DEFENSE_DEAUTH (cooldown 3s)
+    if unique_bssids >= 20: emit DEFENSE_BEACON_FLOOD
+    reset janelas
+  
+  fim do duration_sec
+  ESP ──TLV[0x34] DEFENSE_DONE (alerts=N, totals)──→ App
+```
+
+**Limitações**:
+- Heurísticas simples (thresholds fixos). Cenários edge:
+  - Locais com muitos APs reais (aeroportos, conferências): falso-positivo
+    de beacon_flood.
+  - Roaming agressivo (campus WiFi com mesmo SSID em 50 APs): falso-positivo
+    de evil_twin → vai disparar uma vez (cooldown evita spam).
+  - Karma: alguns devices IoT usam locally-admin mesmo sendo legítimos
+    (ex: ESP32 dev boards, smart bulbs). Falso-positivo aceitável.
+- DEAUTH alert atualmente reporta BSSID `ff:ff:..` (broadcast). Versão
+  futura pode discriminar quem está sendo deauth'd.
+- Detector é silencioso se ataque dura < 1s (precisa cruzar janela).
+- Channel hop perde eventos no canal não-ativo durante o dwell.
+
+**Combinação com outros métodos**:
+- Em paralelo com `pcap_start` em outro canal? **Não** — sniff_wifi
+  é singleton. Pra captura + detecção, escolher um. Ou rodar em
+  pares de invocações.
 
 ---
 
