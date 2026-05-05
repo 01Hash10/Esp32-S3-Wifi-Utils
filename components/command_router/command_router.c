@@ -152,7 +152,10 @@ static void handle_wifi_connect(cJSON *root)
         return;
     }
     const char *psk = cJSON_IsString(psk_j) ? psk_j->valuestring : NULL;
-    uint16_t to = cJSON_IsNumber(to_j) ? (uint16_t)to_j->valueint : 15000;
+    int to_raw = cJSON_IsNumber(to_j) ? to_j->valueint : 15000;
+    if (to_raw < 1000) to_raw = 1000;
+    if (to_raw > 60000) to_raw = 60000;
+    uint16_t to = (uint16_t)to_raw;
 
     uint8_t ip[4], gw[4], mac[6];
     esp_err_t err = attack_lan_wifi_connect(ssid_j->valuestring, psk, to, ip, gw, mac);
@@ -285,19 +288,11 @@ static void handle_deauth(cJSON *root)
     uint16_t count  = cJSON_IsNumber(count_j)  ? (uint16_t)count_j->valueint  : 10;
     uint16_t reason = cJSON_IsNumber(reason_j) ? (uint16_t)reason_j->valueint : 7;
 
-    uint16_t sent = 0;
-    esp_err_t err = hacking_wifi_deauth(target, bssid, channel, count, reason, &sent);
-
+    esp_err_t err = hacking_wifi_deauth(target, bssid, channel, count, reason);
     if (err == ESP_OK) {
-        cJSON *resp = cJSON_CreateObject();
-        cJSON_AddStringToObject(resp, "resp", "deauth");
-        cJSON_AddNumberToObject(resp, "seq", seq);
-        cJSON_AddStringToObject(resp, "status", "completed");
-        cJSON_AddNumberToObject(resp, "sent", sent);
-        cJSON_AddNumberToObject(resp, "channel", channel);
-        cJSON_AddNumberToObject(resp, "reason", reason);
-        send_json(resp);
-        cJSON_Delete(resp);
+        send_ack(seq, "deauth");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "hack_busy", NULL);
     } else {
         send_err(seq, "deauth_failed", esp_err_to_name(err));
     }
@@ -309,18 +304,9 @@ static void handle_ble_spam_apple(cJSON *root)
     cJSON *cyc_j = cJSON_GetObjectItemCaseSensitive(root, "cycles");
     uint16_t cycles = cJSON_IsNumber(cyc_j) ? (uint16_t)cyc_j->valueint : 50;
 
-    uint16_t sent = 0;
-    esp_err_t err = hacking_ble_apple_spam(cycles, &sent);
-
+    esp_err_t err = hacking_ble_apple_spam(cycles);
     if (err == ESP_OK) {
-        cJSON *resp = cJSON_CreateObject();
-        cJSON_AddStringToObject(resp, "resp", "ble_spam_apple");
-        cJSON_AddNumberToObject(resp, "seq", seq);
-        cJSON_AddStringToObject(resp, "status", "completed");
-        cJSON_AddNumberToObject(resp, "sent", sent);
-        cJSON_AddNumberToObject(resp, "cycles", cycles);
-        send_json(resp);
-        cJSON_Delete(resp);
+        send_ack(seq, "ble_spam_apple");
     } else if (err == ESP_ERR_INVALID_STATE) {
         send_err(seq, "spam_busy", NULL);
     } else {
@@ -363,20 +349,12 @@ static void handle_beacon_flood(cJSON *root)
     uint8_t channel = (uint8_t)ch_j->valueint;
     uint16_t cycles = cJSON_IsNumber(cyc_j) ? (uint16_t)cyc_j->valueint : 50;
 
-    uint16_t sent = 0;
     esp_err_t err = hacking_wifi_beacon_flood(channel, cycles,
-                                              ssids, (size_t)n, &sent);
+                                              ssids, (size_t)n);
     if (err == ESP_OK) {
-        cJSON *resp = cJSON_CreateObject();
-        cJSON_AddStringToObject(resp, "resp", "beacon_flood");
-        cJSON_AddNumberToObject(resp, "seq", seq);
-        cJSON_AddStringToObject(resp, "status", "completed");
-        cJSON_AddNumberToObject(resp, "sent", sent);
-        cJSON_AddNumberToObject(resp, "channel", channel);
-        cJSON_AddNumberToObject(resp, "cycles", cycles);
-        cJSON_AddNumberToObject(resp, "ssids", n);
-        send_json(resp);
-        cJSON_Delete(resp);
+        send_ack(seq, "beacon_flood");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "hack_busy", NULL);
     } else {
         send_err(seq, "beacon_failed", esp_err_to_name(err));
     }

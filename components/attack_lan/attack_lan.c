@@ -217,7 +217,7 @@ esp_err_t attack_lan_arp_cut_start(const uint8_t target_ip[4],
 {
     if (!s_connected) return ESP_ERR_INVALID_STATE;
     if (!s_cut.stop)  return ESP_ERR_INVALID_STATE;
-    if (interval_ms < 100) interval_ms = 1000;
+    if (interval_ms < 100) interval_ms = 100;
     if (interval_ms > 5000) interval_ms = 5000;
     if (duration_sec == 0 || duration_sec > 600) duration_sec = 60;
 

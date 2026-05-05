@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "hacking_wifi.c"
     INCLUDE_DIRS "include"
-    REQUIRES protocol esp_wifi
+    REQUIRES protocol transport_ble esp_wifi
 )
 # Nota: tentamos `--wrap=ieee80211_raw_frame_sanity_check` para passar mais
 # frames, mas o blob libnet80211 do IDF 5.4 faz setup de TX dentro dessa

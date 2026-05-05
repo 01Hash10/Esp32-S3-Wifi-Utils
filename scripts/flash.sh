@@ -18,6 +18,12 @@ echo "→ Baud: $BAUD"
 echo "→ Build dir: $BUILD_DIR"
 echo
 
+# Nota: --flash_mode dio é INTENCIONAL aqui, mesmo com sdkconfig configurado
+# em QIO. O esptool reescreve apenas o header do bootloader.bin (pra que o
+# ROM bootloader inicialize a flash em DIO no primeiro boot); o firmware em
+# si continua compilado pra QIO via Kconfig e o IDF faz o switch durante o
+# init. Esse workaround é necessário pra esta DevKit chinesa rev v0.2 onde
+# o init em QIO direto pelo ROM falha. NÃO trocar pra qio aqui.
 "$ESPTOOL" \
     --chip esp32s3 \
     --port "$PORT" \

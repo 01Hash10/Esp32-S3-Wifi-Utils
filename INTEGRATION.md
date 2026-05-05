@@ -107,10 +107,10 @@ Frame:
 | `wifi_scan` | `seq` | `{"resp":"wifi_scan","seq":N,"status":"started"}` (ack imediato; resultados via `stream`) | 2 |
 | `ble_scan` | `seq`, `duration_sec` (opcional, default 10, max 599; 0 = até `ble_scan_stop`) | `{"resp":"ble_scan","seq":N,"status":"started"}` | 2 |
 | `ble_scan_stop` | `seq` | `{"resp":"ble_scan_stop","seq":N,"status":"started"}` (encerra scan em andamento) | 2 |
-| `deauth` | `seq`, `bssid` (string), `target` (string, opcional, default broadcast), `channel` (1–14), `count` (opcional, default 10, max 1000), `reason` (opcional, default 7) | `{"resp":"deauth","seq":N,"status":"completed","sent":N,"channel":N,"reason":N}` | 3 |
-| `beacon_flood` | `seq`, `channel` (1–14), `ssids` (array de strings, 1–32, cada uma ≤32 bytes), `cycles` (opcional, default 50, max 200) | `{"resp":"beacon_flood","seq":N,"status":"completed","sent":N,"channel":N,"cycles":N,"ssids":N}` | 3 |
-| `ble_spam_apple` | `seq`, `cycles` (opcional, default 50, max 500) | `{"resp":"ble_spam_apple","seq":N,"status":"completed","sent":N,"cycles":N}`. Pausa adv do GATT durante o spam e retoma ao final. Cada cycle ~100ms. | 4 |
-| `wifi_connect` | `seq`, `ssid`, `password` (opcional para abertas), `timeout_ms` (opcional, default 15000) | `{"resp":"wifi_connect","seq":N,"status":"connected","ip":"x.x.x.x","gateway":"x.x.x.x","mac":"aa:bb:..."}`. Ou `err: wifi_timeout`/`wifi_failed`. ESP fica como STA até `wifi_disconnect`. | 3 |
+| `deauth` | `seq`, `bssid` (string), `target` (string, opcional, default broadcast), `channel` (1–14), `count` (opcional, default 10, max 1000), `reason` (opcional, default 7) | `{"resp":"deauth","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_DEAUTH_DONE` no `stream`). Roda em task assíncrona pra não bloquear BLE. | 3 |
+| `beacon_flood` | `seq`, `channel` (1–14), `ssids` (array de strings, 1–32, cada uma ≤32 bytes), `cycles` (opcional, default 50, max 200) | `{"resp":"beacon_flood","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_BEACON_DONE` no `stream`). Async. | 3 |
+| `ble_spam_apple` | `seq`, `cycles` (opcional, default 50, max 500) | `{"resp":"ble_spam_apple","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_BLE_SPAM_DONE` no `stream`). Pausa adv do GATT durante o spam e retoma ao final. Cada cycle ~100ms. Async. | 4 |
+| `wifi_connect` | `seq`, `ssid`, `password` (opcional para abertas), `timeout_ms` (opcional, default 15000, range 1000–60000) | `{"resp":"wifi_connect","seq":N,"status":"connected","ip":"x.x.x.x","gateway":"x.x.x.x","mac":"aa:bb:..."}`. Ou `err: wifi_timeout`/`wifi_failed`. ESP fica como STA até `wifi_disconnect`. | 3 |
 | `wifi_disconnect` | `seq` | `{"resp":"wifi_disconnect","seq":N,"status":"disconnected"}`. Para qualquer `arp_cut` ativo também. | 3 |
 | `arp_cut` | `seq`, `target_ip` (string IPv4), `target_mac` (string), `gateway_ip`, `gateway_mac`, `interval_ms` (100–5000, default 1000), `duration_sec` (1–600, default 60) | `{"resp":"arp_cut","seq":N,"status":"started",...}`. Roda em task assíncrona. Requer `wifi_connect` antes. Modo "drop": ESP não encaminha tráfego. | 3 |
 | `arp_cut_stop` | `seq` | `{"resp":"arp_cut_stop","seq":N,"status":"stopping"}`. | 3 |
@@ -133,17 +133,20 @@ Toda resposta de erro segue o schema:
 | `bad_bssid` | Campo `bssid` ausente ou formato inválido (esperado `aa:bb:cc:dd:ee:ff`) |
 | `bad_target` | Campo `target` em formato inválido |
 | `bad_channel` | Campo `channel` ausente ou fora de 1–14 |
-| `deauth_failed` | `esp_wifi_80211_tx` rejeitou a frame (`msg` = nome do erro). Ver nota sobre filtro do firmware Espressif |
+| `deauth_failed` | Falha ao iniciar a task de deauth (ex: heap baixo, args inválidos). `msg` traz o erro |
+| `hack_busy` | `deauth`/`beacon_flood` solicitado enquanto outro job de hacking_wifi roda |
 | `bad_ssids` | Campo `ssids` ausente ou tamanho fora de 1–32 |
 | `bad_ssid_entry` | Algum item do array `ssids` não é string ou está vazio |
-| `beacon_failed` | `esp_wifi_80211_tx` rejeitou a frame de beacon |
-| `spam_busy` | `ble_spam_apple` solicitado durante outro spam |
-| `spam_failed` | NimBLE rejeitou o adv (`msg` = nome do erro) |
+| `beacon_failed` | Falha ao iniciar a task de beacon_flood. `msg` traz o erro |
+| `spam_busy` | `ble_spam_apple` solicitado durante outro spam ainda rodando |
+| `spam_failed` | Falha ao iniciar a task de apple spam. `msg` traz o erro |
+| `bad_ssid` | Campo `ssid` ausente ou vazio em `wifi_connect` |
 | `wifi_timeout` | `wifi_connect` não obteve IP via DHCP no tempo dado |
 | `wifi_failed` | `esp_wifi_set_config`/`esp_wifi_connect` falhou |
 | `wifi_not_connected` | `arp_cut` chamado sem `wifi_connect` prévio |
 | `bad_target_ip`/`bad_target_mac`/`bad_gateway_ip`/`bad_gateway_mac` | Formato inválido nos campos do `arp_cut` |
 | `cut_busy_or_offline` | Outro `arp_cut` rodando, ou ESP não conectado |
+| `cut_failed` | Falha ao iniciar a task do `arp_cut` (ex: heap baixo). `msg` traz detalhe |
 | `cut_idle` | `arp_cut_stop` chamado sem cut em andamento |
 
 ### Exemplos de troca
@@ -178,6 +181,9 @@ Toda resposta de erro segue o schema:
 | `0x11` | `WIFI_SCAN_DONE` | device → app | resumo final do scan | 2 |
 | `0x12` | `BLE_SCAN_DEV` | device → app | 1 device por frame (dedup por MAC) | 2 |
 | `0x13` | `BLE_SCAN_DONE` | device → app | resumo final do scan BLE | 2 |
+| `0x20` | `HACK_DEAUTH_DONE` | device → app | resultado final do `deauth` | 3 |
+| `0x21` | `HACK_BEACON_DONE` | device → app | resultado final do `beacon_flood` | 3 |
+| `0x22` | `HACK_BLE_SPAM_DONE` | device → app | resultado final do `ble_spam_apple` | 4 |
 
 ### `0x10 WIFI_SCAN_AP` — payload
 
@@ -243,6 +249,37 @@ Toda resposta de erro segue o schema:
 > recebe N frames `WIFI_SCAN_AP` em `stream` (um por AP) → recebe
 > `WIFI_SCAN_DONE` indicando fim. Os `seq` do TLV são incrementais por
 > characteristic (independente do `seq` do JSON em `cmd_ctrl`).
+
+### `0x20 HACK_DEAUTH_DONE` — payload (7 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `sent` | uint16 BE, frames efetivamente aceitos pelo TX |
+| 2 | 2 | `requested` | uint16 BE, valor de `count` clampado pelo firmware |
+| 4 | 1 | `channel` | canal usado |
+| 5 | 2 | `reason` | uint16 BE, reason code 802.11 utilizado |
+
+### `0x21 HACK_BEACON_DONE` — payload (6 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `sent` | uint16 BE, frames aceitos pelo TX |
+| 2 | 2 | `cycles` | uint16 BE, cycles efetivamente percorridos |
+| 4 | 1 | `channel` | canal usado |
+| 5 | 1 | `ssid_count` | número de SSIDs no flood |
+
+### `0x22 HACK_BLE_SPAM_DONE` — payload (4 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `sent` | uint16 BE, cycles em que adv foi disparado com sucesso |
+| 2 | 2 | `requested` | uint16 BE, valor de `cycles` clampado pelo firmware |
+
+> Comandos `deauth`, `beacon_flood` e `ble_spam_apple` são **assíncronos**:
+> o firmware ack'a com `status:"started"` em `cmd_ctrl` e, ao terminar a
+> task, emite o TLV correspondente em `stream`. O app deve correlacionar
+> pela ordem dos eventos (não há `seq` do JSON original no payload TLV —
+> o `seq` do TLV é incrementado independentemente).
 
 ### Faixas reservadas de `msg_type`
 
@@ -353,3 +390,4 @@ Future<void> connectAndPing() async {
 | 2026-05-04 | Phase 3 | Comando `beacon_flood`: gera beacon (subtype 0x08) com SSIDs do app, BSSID derivado de hash(ssid+idx) com prefixo locally-administered (0x02:..) |
 | 2026-05-04 | Phase 4 | Comando `ble_spam_apple`: spam de Apple Continuity Proximity Pairing (subtype 0x07), 5 modelos (AirPods/Pro/Max/Beats/Pro2), random MAC por cycle |
 | 2026-05-05 | Phase 3 | Comandos `wifi_connect`/`wifi_disconnect`/`arp_cut`/`arp_cut_stop`: ARP poisoning (NetCut-like) via lwip pbuf + linkoutput, modo "drop" |
+| 2026-05-05 | Phase 3/4 | `deauth`/`beacon_flood`/`ble_spam_apple` viraram **assíncronos**: ack `started` em `cmd_ctrl`, resultado final em TLVs novos (`HACK_DEAUTH_DONE 0x20`, `HACK_BEACON_DONE 0x21`, `HACK_BLE_SPAM_DONE 0x22`). Evita supervision timeout do BLE com runs longos. Novo erro `hack_busy` quando há job concorrente. |

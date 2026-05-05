@@ -5,6 +5,9 @@ de AirPods/Beats em iPhones próximos.
 
 Uso:
     ~/.platformio/penv/bin/python scripts/ble_spam_test.py [--cycles 50]
+
+O firmware ack'a com `started` em cmd_ctrl e, ao final, emite TLV
+HACK_BLE_SPAM_DONE (0x22) em stream com sent/requested.
 """
 import argparse
 import asyncio
@@ -13,8 +16,9 @@ import sys
 
 from bleak import BleakClient, BleakScanner
 
-SVC_UUID = "e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c01"
-CMD_UUID = "e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c02"
+SVC_UUID    = "e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c01"
+CMD_UUID    = "e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c02"
+STREAM_UUID = "e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c03"
 
 
 async def find_target():
@@ -27,6 +31,15 @@ async def find_target():
     return None
 
 
+def decode_spam_done(payload: bytes) -> dict:
+    if len(payload) < 4:
+        return {"_truncated": payload.hex()}
+    return {
+        "sent":      int.from_bytes(payload[0:2], "big"),
+        "requested": int.from_bytes(payload[2:4], "big"),
+    }
+
+
 async def run(args):
     dev = await find_target()
     if not dev:
@@ -34,10 +47,27 @@ async def run(args):
     print(f"→ connecting to {dev.address} ({dev.name})")
 
     async with BleakClient(dev) as client:
-        await client.start_notify(
-            CMD_UUID,
-            lambda h, d: print(f"← {d.decode('utf-8', errors='replace')}"),
-        )
+        done_evt = asyncio.Event()
+        result = {}
+
+        def cmd_cb(_h, data):
+            print(f"← cmd: {data.decode('utf-8', errors='replace')}")
+
+        def stream_cb(_h, data):
+            if len(data) < 4:
+                return
+            mtype = data[2]
+            payload = bytes(data[4:])
+            if mtype == 0x22:
+                result.update(decode_spam_done(payload))
+                print(f"← stream HACK_BLE_SPAM_DONE: {result}")
+                done_evt.set()
+            else:
+                print(f"← stream type=0x{mtype:02x} ({len(payload)}B)")
+
+        await client.start_notify(CMD_UUID, cmd_cb)
+        await client.start_notify(STREAM_UUID, stream_cb)
+
         cmd = {"cmd": "ble_spam_apple", "seq": 1, "cycles": args.cycles}
         payload = json.dumps(cmd)
         print(f"→ {payload}")
@@ -45,8 +75,11 @@ async def run(args):
         print(f"→ aproxime um iPhone/iPad próximo da placa pra ver os popups")
         await client.write_gatt_char(CMD_UUID, payload.encode("utf-8"), response=True)
 
-        # Aguarda spam terminar (cycles * 100ms + slack)
-        await asyncio.sleep(args.cycles * 0.1 + 5)
+        timeout = args.cycles * 0.1 + 10
+        try:
+            await asyncio.wait_for(done_evt.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            print(f"✗ timeout waiting HACK_BLE_SPAM_DONE ({timeout:.0f}s)")
 
 
 if __name__ == "__main__":

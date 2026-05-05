@@ -8,6 +8,9 @@ Uso:
         --channel 1 \\
         --cycles 50 \\
         --ssids "FreeWifi,Starbucks,Cafe Free,IT Support,Public-WiFi"
+
+O firmware ack'a com `started` em cmd_ctrl e, ao final, emite TLV
+HACK_BEACON_DONE (0x21) em stream com sent/cycles/channel/ssid_count.
 """
 import argparse
 import asyncio
@@ -16,8 +19,9 @@ import sys
 
 from bleak import BleakClient, BleakScanner
 
-SVC_UUID = "e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c01"
-CMD_UUID = "e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c02"
+SVC_UUID    = "e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c01"
+CMD_UUID    = "e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c02"
+STREAM_UUID = "e7c0c5a0-4f1f-4b1a-9d6c-1a8d4b5e0c03"
 
 
 async def find_target():
@@ -28,6 +32,17 @@ async def find_target():
             if (d.name or "").startswith("WifiUtils-"):
                 return d
     return None
+
+
+def decode_beacon_done(payload: bytes) -> dict:
+    if len(payload) < 6:
+        return {"_truncated": payload.hex()}
+    return {
+        "sent":       int.from_bytes(payload[0:2], "big"),
+        "cycles":     int.from_bytes(payload[2:4], "big"),
+        "channel":    payload[4],
+        "ssid_count": payload[5],
+    }
 
 
 async def run(args):
@@ -43,10 +58,27 @@ async def run(args):
     print(f"→ channel={args.channel}, cycles={args.cycles}, total_tx={args.cycles*len(ssids)}")
 
     async with BleakClient(dev) as client:
-        await client.start_notify(
-            CMD_UUID,
-            lambda h, d: print(f"← {d.decode('utf-8', errors='replace')}"),
-        )
+        done_evt = asyncio.Event()
+        result = {}
+
+        def cmd_cb(_h, data):
+            print(f"← cmd: {data.decode('utf-8', errors='replace')}")
+
+        def stream_cb(_h, data):
+            if len(data) < 4:
+                return
+            mtype = data[2]
+            payload = bytes(data[4:])
+            if mtype == 0x21:
+                result.update(decode_beacon_done(payload))
+                print(f"← stream HACK_BEACON_DONE: {result}")
+                done_evt.set()
+            else:
+                print(f"← stream type=0x{mtype:02x} ({len(payload)}B)")
+
+        await client.start_notify(CMD_UUID, cmd_cb)
+        await client.start_notify(STREAM_UUID, stream_cb)
+
         cmd = {
             "cmd": "beacon_flood", "seq": 1,
             "channel": args.channel,
@@ -57,9 +89,12 @@ async def run(args):
         print(f"→ {payload}")
         await client.write_gatt_char(CMD_UUID, payload.encode("utf-8"), response=True)
 
-        # Tempo estimado: cycles * len(ssids) * 2ms + slack
-        est = args.cycles * len(ssids) * 0.003 + 2
-        await asyncio.sleep(min(15, est))
+        # Estimativa: cycles * len(ssids) * 10ms + slack
+        timeout = args.cycles * len(ssids) * 0.012 + 5
+        try:
+            await asyncio.wait_for(done_evt.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            print(f"✗ timeout waiting HACK_BEACON_DONE ({timeout:.0f}s)")
 
 
 if __name__ == "__main__":

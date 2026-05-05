@@ -29,6 +29,12 @@ typedef enum {
     TLV_MSG_WIFI_SCAN_DONE  = 0x11,
     TLV_MSG_BLE_SCAN_DEV    = 0x12,
     TLV_MSG_BLE_SCAN_DONE   = 0x13,
+
+    // Hacking events (0x20–0x2F): emitidos ao final de um job assíncrono
+    // disparado por deauth / beacon_flood / ble_spam_apple.
+    TLV_MSG_HACK_DEAUTH_DONE   = 0x20,
+    TLV_MSG_HACK_BEACON_DONE   = 0x21,
+    TLV_MSG_HACK_BLE_SPAM_DONE = 0x22,
     // demais tipos serão adicionados conforme features são entregues.
 } tlv_msg_type_t;
 

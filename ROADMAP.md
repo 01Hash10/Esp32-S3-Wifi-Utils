@@ -92,8 +92,6 @@ ou removidos ao longo do projeto.
 - [ ] LAN host discovery (ping sweep / ARP scan)
 
 ### Demais
-- [ ] Deauth broadcast (kick all clients de um BSSID)
-- [~] Beacon flood — lista custom de SSIDs (do app) — feito acima, validação pendente
 - [ ] PMKID capture
 - [ ] Probe request sniffing + dossiê de devices
 - [ ] Evil twin / Captive portal (AP fake + DNS hijack)
