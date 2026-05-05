@@ -36,5 +36,20 @@ esp_err_t hacking_wifi_beacon_flood(uint8_t channel,
                                     const char *const *ssids,
                                     size_t ssid_count);
 
-// Indica se há um job (deauth ou beacon_flood) rodando agora.
+// Indica se há um job (deauth ou beacon_flood ou channel_jam) rodando agora.
 bool hacking_wifi_busy(void);
+
+// Channel jam: spam de RTS frames broadcast (FC=0xB4) com duration field
+// alto, fazendo todas as STAs no canal respeitarem o NAV (Network
+// Allocation Vector) e ficarem em silêncio. Resultado: airtime do canal
+// fica monopolizado pelo ESP, vítimas não conseguem TX/RX.
+//
+// Async via FreeRTOS task. Emite TLV_MSG_HACK_JAM_DONE ao final.
+//
+// @param channel canal alvo (1–14)
+// @param duration_sec 1..120 (limitado pra não esgotar bateria/aquecimento)
+// @return ESP_ERR_INVALID_STATE se outro job de hacking_wifi rodando.
+esp_err_t hacking_wifi_channel_jam(uint8_t channel, uint16_t duration_sec);
+
+// Para um channel_jam em andamento (sinaliza stop pra task).
+esp_err_t hacking_wifi_channel_jam_stop(void);

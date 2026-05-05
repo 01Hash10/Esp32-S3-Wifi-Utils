@@ -109,11 +109,18 @@ Frame:
 | `ble_scan_stop` | `seq` | `{"resp":"ble_scan_stop","seq":N,"status":"started"}` (encerra scan em andamento) | 2 |
 | `deauth` | `seq`, `bssid` (string), `target` (string, opcional, default broadcast), `channel` (1–14), `count` (opcional, default 10, max 1000), `reason` (opcional, default 7) | `{"resp":"deauth","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_DEAUTH_DONE` no `stream`). Roda em task assíncrona pra não bloquear BLE. | 3 |
 | `beacon_flood` | `seq`, `channel` (1–14), `ssids` (array de strings, 1–32, cada uma ≤32 bytes), `cycles` (opcional, default 50, max 200) | `{"resp":"beacon_flood","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_BEACON_DONE` no `stream`). Async. | 3 |
-| `ble_spam_apple` | `seq`, `cycles` (opcional, default 50, max 500) | `{"resp":"ble_spam_apple","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_BLE_SPAM_DONE` no `stream`). Pausa adv do GATT durante o spam e retoma ao final. Cada cycle ~100ms. Async. | 4 |
+| `ble_spam_apple` | `seq`, `cycles` (opcional, default 50, max 500) | `{"resp":"ble_spam_apple","seq":N,"status":"started"}` (ack; resultado final via TLV `HACK_BLE_SPAM_DONE` em `stream`, vendor=0). Pausa adv do GATT. Cada cycle ~100ms. | 4 |
+| `ble_spam_samsung` | `seq`, `cycles` (default 50, max 500) | Idem, vendor=1 no DONE. Galaxy Buds popups em phones Samsung. | 4 |
+| `ble_spam_google` | `seq`, `cycles` (default 50, max 500) | Idem, vendor=2 no DONE. Pixel Buds popups em Android com Fast Pair. | 4 |
+| `ble_spam_multi` | `seq`, `cycles` (default 50, max 500) | Idem, vendor=255 (multi). Cada cycle escolhe Apple/Samsung/Google aleatoriamente. | 4 |
 | `wifi_connect` | `seq`, `ssid`, `password` (opcional para abertas), `timeout_ms` (opcional, default 15000, range 1000–60000) | `{"resp":"wifi_connect","seq":N,"status":"connected","ip":"x.x.x.x","gateway":"x.x.x.x","mac":"aa:bb:..."}`. Ou `err: wifi_timeout`/`wifi_failed`. ESP fica como STA até `wifi_disconnect`. | 3 |
 | `wifi_disconnect` | `seq` | `{"resp":"wifi_disconnect","seq":N,"status":"disconnected"}`. Para qualquer `arp_cut` ativo também. | 3 |
 | `arp_cut` | `seq`, `target_ip` (string IPv4), `target_mac` (string), `gateway_ip`, `gateway_mac`, `interval_ms` (100–5000, default 1000), `duration_sec` (1–600, default 60) | `{"resp":"arp_cut","seq":N,"status":"started",...}`. Roda em task assíncrona. Requer `wifi_connect` antes. Modo "drop": ESP não encaminha tráfego. | 3 |
 | `arp_cut_stop` | `seq` | `{"resp":"arp_cut_stop","seq":N,"status":"stopping"}`. | 3 |
+| `arp_throttle` | `seq`, `target_ip`, `target_mac`, `gateway_ip`, `gateway_mac`, `on_ms` (200–60000, default 5000), `off_ms` (200–60000, default 5000), `duration_sec` (1–600, default 60) | `{"resp":"arp_throttle","seq":N,"status":"started","on_ms":N,"off_ms":N,"duration_sec":N}`. Alterna ciclos de poison (on_ms) e restore (off_ms) — vítima tem internet intermitente. | 3 |
+| `arp_throttle_stop` | `seq` | `{"resp":"arp_throttle_stop","seq":N,"status":"stopping"}`. | 3 |
+| `channel_jam` | `seq`, `channel` (1–14), `duration_sec` (opcional, 1–120, default 10) | `{"resp":"channel_jam","seq":N,"status":"started"}` (ack imediato; final via TLV `HACK_JAM_DONE` em `stream`). Spam de RTS broadcast trava NAV no canal — STAs ficam silenciosas. Cap de 120s pra não fritar a placa. | 3 |
+| `channel_jam_stop` | `seq` | `{"resp":"channel_jam_stop","seq":N,"status":"started"}`. | 3 |
 | `lan_scan` | `seq`, `timeout_ms` (opcional, default 3000, range 500–30000) | `{"resp":"lan_scan","seq":N,"status":"started"}` (ack imediato; hosts via TLV `LAN_HOST` em `stream`, fim via TLV `LAN_SCAN_DONE`). Requer `wifi_connect` antes. ARP scan no /24 do IP atual, ~5–8s típicos. | 3 |
 | `probe_sniff` | `seq`, `ch_min` (1–13, default 1), `ch_max` (1–13, default 13, ≥ ch_min), `dwell_ms` (100–5000, default 500), `duration_sec` (1–300, default 30) | `{"resp":"probe_sniff","seq":N,"status":"started"}` (ack imediato; cada probe único via TLV `PROBE_REQ` em `stream`, fim via `PROBE_DONE`). **Requer ESP NÃO conectado** (`wifi_disconnect` antes se preciso). Channel hopping no range, dedup por (mac, ssid) até 256 entradas. | 3 |
 | `probe_sniff_stop` | `seq` | `{"resp":"probe_sniff_stop","seq":N,"status":"started"}` (encerra cedo). | 3 |
@@ -202,7 +209,8 @@ Toda resposta de erro segue o schema:
 | `0x1B` | `PMKID_DONE` | device → app | resumo final do `pmkid_capture` | 3 |
 | `0x20` | `HACK_DEAUTH_DONE` | device → app | resultado final do `deauth` | 3 |
 | `0x21` | `HACK_BEACON_DONE` | device → app | resultado final do `beacon_flood` | 3 |
-| `0x22` | `HACK_BLE_SPAM_DONE` | device → app | resultado final do `ble_spam_apple` | 4 |
+| `0x22` | `HACK_BLE_SPAM_DONE` | device → app | resultado final dos `ble_spam_*` (apple/samsung/google/multi) | 4 |
+| `0x23` | `HACK_JAM_DONE` | device → app | resultado final do `channel_jam` | 3 |
 
 ### `0x10 WIFI_SCAN_AP` — payload
 
@@ -378,12 +386,21 @@ Toda resposta de erro segue o schema:
 | 4 | 1 | `channel` | canal usado |
 | 5 | 1 | `ssid_count` | número de SSIDs no flood |
 
-### `0x22 HACK_BLE_SPAM_DONE` — payload (4 bytes)
+### `0x22 HACK_BLE_SPAM_DONE` — payload (5 bytes)
 
 | Offset | Tamanho | Campo | Descrição |
 |---|---|---|---|
 | 0 | 2 | `sent` | uint16 BE, cycles em que adv foi disparado com sucesso |
 | 2 | 2 | `requested` | uint16 BE, valor de `cycles` clampado pelo firmware |
+| 4 | 1 | `vendor` | 0 = Apple, 1 = Samsung, 2 = Google, 0xFF = multi |
+
+### `0x23 HACK_JAM_DONE` — payload (7 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 4 | `sent` | uint32 BE, frames RTS efetivamente aceitos pelo TX |
+| 4 | 2 | `duration_sec` | uint16 BE, duração configurada |
+| 6 | 1 | `channel` | canal usado |
 
 > Comandos `deauth`, `beacon_flood` e `ble_spam_apple` são **assíncronos**:
 > o firmware ack'a com `status:"started"` em `cmd_ctrl` e, ao terminar a
@@ -505,3 +522,6 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3 | Comandos `probe_sniff` / `probe_sniff_stop`: sniffer de probe requests via WiFi promiscuous mode com channel hopping. Requer ESP não-conectado. Emite TLV `PROBE_REQ 0x16` por (mac, ssid) único + `PROBE_DONE 0x17` ao final. Erros novos: `wifi_busy`, `sniff_busy`, `sniff_failed`, `sniff_idle`. |
 | 2026-05-05 | Phase 3 | Comandos `wpa_capture` / `wpa_capture_stop`: captura EAPOL 4-way handshake num BSSID/canal específico. Emite TLV `WPA_EAPOL 0x18` por frame (frame 802.11 bruto, pcap-friendly) + `WPA_CAPTURE_DONE 0x19` com mask M1..M4. Encerra cedo se 4-way completo. App pode emitir `deauth` paralelo pra forçar handshake. |
 | 2026-05-05 | Phase 3 | Comandos `pmkid_capture` / `pmkid_capture_stop`: extrai PMKID KDE (OUI `00:0F:AC`/type `0x04`) do EAPOL-Key M1. Compacto: TLV `PMKID_FOUND 0x1A` (28B) + `PMKID_DONE 0x1B`. Encerra na 1ª PMKID. ESSID fornecido pelo app pra montar hash hashcat WPA*02. |
+| 2026-05-05 | Phase 3 | Comandos `arp_throttle` / `arp_throttle_stop`: variação do `arp_cut` que alterna ciclos ON (poison) e OFF (restore via ARP corretivo). Vítima fica com internet intermitente. |
+| 2026-05-05 | Phase 3 | Comandos `channel_jam` / `channel_jam_stop`: spam de RTS broadcast com duration alto (~33ms NAV) num canal fixo. Trava airtime, vítimas no canal não conseguem TX/RX. Cap 120s. Novo TLV `HACK_JAM_DONE 0x23`. |
+| 2026-05-05 | Phase 4 | Comandos `ble_spam_samsung`, `ble_spam_google`, `ble_spam_multi`. Reusam pipeline do apple_spam. TLV `HACK_BLE_SPAM_DONE 0x22` ganhou byte `vendor` no payload (0=Apple, 1=Samsung, 2=Google, 0xFF=multi). Backward-compat: app antigo que só lia 4B continua funcionando. |

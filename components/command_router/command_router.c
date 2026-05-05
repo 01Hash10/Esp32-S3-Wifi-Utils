@@ -398,6 +398,71 @@ static void handle_pmkid_capture_stop(cJSON *root)
     }
 }
 
+static void handle_arp_throttle(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (!attack_lan_is_connected()) {
+        send_err(seq, "wifi_not_connected", NULL);
+        return;
+    }
+
+    cJSON *t_ip_j   = cJSON_GetObjectItemCaseSensitive(root, "target_ip");
+    cJSON *t_mac_j  = cJSON_GetObjectItemCaseSensitive(root, "target_mac");
+    cJSON *gw_ip_j  = cJSON_GetObjectItemCaseSensitive(root, "gateway_ip");
+    cJSON *gw_mac_j = cJSON_GetObjectItemCaseSensitive(root, "gateway_mac");
+    cJSON *on_j     = cJSON_GetObjectItemCaseSensitive(root, "on_ms");
+    cJSON *off_j    = cJSON_GetObjectItemCaseSensitive(root, "off_ms");
+    cJSON *dur_j    = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+
+    uint8_t t_ip[4], t_mac[6], gw_ip[4], gw_mac[6];
+    if (!cJSON_IsString(t_ip_j)   || parse_ipv4(t_ip_j->valuestring, t_ip)   != 0)
+        { send_err(seq, "bad_target_ip", NULL); return; }
+    if (!cJSON_IsString(t_mac_j)  || parse_mac(t_mac_j->valuestring, t_mac)  != 0)
+        { send_err(seq, "bad_target_mac", NULL); return; }
+    if (!cJSON_IsString(gw_ip_j)  || parse_ipv4(gw_ip_j->valuestring, gw_ip) != 0)
+        { send_err(seq, "bad_gateway_ip", NULL); return; }
+    if (!cJSON_IsString(gw_mac_j) || parse_mac(gw_mac_j->valuestring, gw_mac)!= 0)
+        { send_err(seq, "bad_gateway_mac", NULL); return; }
+
+    uint16_t on  = cJSON_IsNumber(on_j)  ? (uint16_t)on_j->valueint  : 5000;
+    uint16_t off = cJSON_IsNumber(off_j) ? (uint16_t)off_j->valueint : 5000;
+    uint16_t dur = cJSON_IsNumber(dur_j) ? (uint16_t)dur_j->valueint : 60;
+
+    esp_err_t err = attack_lan_arp_throttle_start(t_ip, t_mac, gw_ip, gw_mac,
+                                                   on, off, dur);
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "arp_throttle");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "started");
+        cJSON_AddNumberToObject(resp, "on_ms", on);
+        cJSON_AddNumberToObject(resp, "off_ms", off);
+        cJSON_AddNumberToObject(resp, "duration_sec", dur);
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "cut_busy_or_offline", NULL);
+    } else {
+        send_err(seq, "cut_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_arp_throttle_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = attack_lan_arp_throttle_stop();
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "arp_throttle_stop");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "stopping");
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else {
+        send_err(seq, "cut_idle", NULL);
+    }
+}
+
 static void handle_lan_scan(cJSON *root)
 {
     int seq = seq_of(root);
@@ -464,20 +529,78 @@ static void handle_deauth(cJSON *root)
     }
 }
 
-static void handle_ble_spam_apple(cJSON *root)
+static void handle_channel_jam(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *ch_j  = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *dur_j = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 14) {
+        send_err(seq, "bad_channel", NULL);
+        return;
+    }
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 10;
+    if (dur < 1)   dur = 1;
+    if (dur > 120) dur = 120;
+
+    esp_err_t err = hacking_wifi_channel_jam((uint8_t)ch_j->valueint,
+                                              (uint16_t)dur);
+    if (err == ESP_OK) {
+        send_ack(seq, "channel_jam");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "hack_busy", NULL);
+    } else {
+        send_err(seq, "jam_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_channel_jam_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = hacking_wifi_channel_jam_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "channel_jam_stop");
+    } else {
+        send_err(seq, "hack_idle", NULL);
+    }
+}
+
+// Helper genérico pra todos os ble_spam_* (apple, samsung, google, multi).
+static void dispatch_ble_spam(cJSON *root, const char *cmd_name,
+                               esp_err_t (*fn)(uint16_t))
 {
     int seq = seq_of(root);
     cJSON *cyc_j = cJSON_GetObjectItemCaseSensitive(root, "cycles");
     uint16_t cycles = cJSON_IsNumber(cyc_j) ? (uint16_t)cyc_j->valueint : 50;
 
-    esp_err_t err = hacking_ble_apple_spam(cycles);
+    esp_err_t err = fn(cycles);
     if (err == ESP_OK) {
-        send_ack(seq, "ble_spam_apple");
+        send_ack(seq, cmd_name);
     } else if (err == ESP_ERR_INVALID_STATE) {
         send_err(seq, "spam_busy", NULL);
     } else {
         send_err(seq, "spam_failed", esp_err_to_name(err));
     }
+}
+
+static void handle_ble_spam_apple(cJSON *root)
+{
+    dispatch_ble_spam(root, "ble_spam_apple", hacking_ble_apple_spam);
+}
+
+static void handle_ble_spam_samsung(cJSON *root)
+{
+    dispatch_ble_spam(root, "ble_spam_samsung", hacking_ble_samsung_spam);
+}
+
+static void handle_ble_spam_google(cJSON *root)
+{
+    dispatch_ble_spam(root, "ble_spam_google", hacking_ble_google_spam);
+}
+
+static void handle_ble_spam_multi(cJSON *root)
+{
+    dispatch_ble_spam(root, "ble_spam_multi", hacking_ble_multi_spam);
 }
 
 static void handle_beacon_flood(cJSON *root)
@@ -587,8 +710,18 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_deauth(root);
     } else if (strcmp(c, "beacon_flood") == 0) {
         handle_beacon_flood(root);
+    } else if (strcmp(c, "channel_jam") == 0) {
+        handle_channel_jam(root);
+    } else if (strcmp(c, "channel_jam_stop") == 0) {
+        handle_channel_jam_stop(root);
     } else if (strcmp(c, "ble_spam_apple") == 0) {
         handle_ble_spam_apple(root);
+    } else if (strcmp(c, "ble_spam_samsung") == 0) {
+        handle_ble_spam_samsung(root);
+    } else if (strcmp(c, "ble_spam_google") == 0) {
+        handle_ble_spam_google(root);
+    } else if (strcmp(c, "ble_spam_multi") == 0) {
+        handle_ble_spam_multi(root);
     } else if (strcmp(c, "wifi_connect") == 0) {
         handle_wifi_connect(root);
     } else if (strcmp(c, "wifi_disconnect") == 0) {
@@ -597,6 +730,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_arp_cut(root);
     } else if (strcmp(c, "arp_cut_stop") == 0) {
         handle_arp_cut_stop(root);
+    } else if (strcmp(c, "arp_throttle") == 0) {
+        handle_arp_throttle(root);
+    } else if (strcmp(c, "arp_throttle_stop") == 0) {
+        handle_arp_throttle_stop(root);
     } else if (strcmp(c, "lan_scan") == 0) {
         handle_lan_scan(root);
     } else if (strcmp(c, "probe_sniff") == 0) {
@@ -621,8 +758,9 @@ void command_router_handle_json(const uint8_t *data, size_t len)
 esp_err_t command_router_init(void)
 {
     ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan, ble_scan, ble_scan_stop,"
-                  " deauth, beacon_flood, ble_spam_apple, wifi_connect, wifi_disconnect,"
-                  " arp_cut, arp_cut_stop, lan_scan, probe_sniff, probe_sniff_stop,"
-                  " wpa_capture, wpa_capture_stop, pmkid_capture, pmkid_capture_stop)");
+                  " deauth, beacon_flood, channel_jam[_stop],"
+                  " ble_spam_{apple,samsung,google,multi}, wifi_connect, wifi_disconnect,"
+                  " arp_cut[_stop], arp_throttle[_stop], lan_scan, probe_sniff[_stop],"
+                  " wpa_capture[_stop], pmkid_capture[_stop])");
     return ESP_OK;
 }

@@ -27,8 +27,10 @@ firmware, explica:
 ### Phase 3 — Hacking & Recon
 - [Deauth (`deauth`)](#deauth--80211-deauth-attack)
 - [Beacon flood (`beacon_flood`)](#beacon_flood--ssid-spoof-mass)
+- [Channel jamming (`channel_jam`)](#channel_jam--airtime-lock-via-rts-broadcast)
 - [WiFi STA connect/disconnect (`wifi_connect` / `wifi_disconnect`)](#wifi_connect--wifi_disconnect--associacao-sta)
 - [ARP poisoning / NetCut (`arp_cut` / `arp_cut_stop`)](#arp_cut--netcut-style-poisoning-modo-drop)
+- [ARP throttle (`arp_throttle`)](#arp_throttle--internet-intermitente-via-cycle-onoff)
 - [LAN host discovery (`lan_scan`)](#lan_scan--arp-scan-no-24)
 - [Probe request sniffing (`probe_sniff`)](#probe_sniff--captura-de-probe-requests)
 - [WPA handshake capture (`wpa_capture`)](#wpa_capture--captura-do-eapol-4-way-handshake)
@@ -36,6 +38,9 @@ firmware, explica:
 
 ### Phase 4 — BLE
 - [Apple Continuity spam (`ble_spam_apple`)](#ble_spam_apple--apple-continuity-proximity-spam)
+- [Samsung EasySetup spam (`ble_spam_samsung`)](#ble_spam_samsung--samsung-easysetup-popup-spam)
+- [Google Fast Pair spam (`ble_spam_google`)](#ble_spam_google--google-fast-pair-popup-spam)
+- [Multi-vendor BLE spam (`ble_spam_multi`)](#ble_spam_multi--apple--samsung--google-aleatorio-por-cycle)
 
 ---
 
@@ -240,6 +245,54 @@ filtram. Validação visual no hardware pendente. Limite cycles=200.
 
 ---
 
+## `channel_jam` — airtime lock via RTS broadcast
+
+**O que faz**: trava o canal por N segundos. Stations no canal não
+conseguem TX/RX significativo enquanto rodando — DoS de airtime.
+
+**Como funciona** (802.11 NAV — Network Allocation Vector):
+- Frame RTS (Request-to-Send) tem um campo `Duration` (16-bit) que diz
+  pra outras stations: "vou ocupar o canal por X µs, fiquem quietas".
+- Toda STA que ouve um RTS válido atualiza seu NAV e respeita —
+  não TX até NAV expirar.
+- Se mandarmos RTS com duration alto (32767µs ≈ 33ms) a cada ~25ms,
+  o NAV nunca expira — todo o canal trava.
+
+**Frame layout** (16 bytes, FC=Ctrl/RTS):
+```
+[0..1]   FC: 0xB4 0x00 (type=Ctrl=01, subtype=RTS=1011)
+[2..3]   duration: 0xFF 0x7F (32767 µs LE)
+[4..9]   addr1 (RA) = ff:ff:ff:ff:ff:ff (broadcast)
+[10..15] addr2 (TA) = MAC fake (locally administered: 02:CA:FE:BE:EF:00)
+```
+
+**Implementação** (`hacking_wifi.c`):
+- Async via task. Cap de 120s por sessão (não fritar a placa).
+- Loop tight: copia template, `esp_wifi_80211_tx`, `vTaskDelay(25ms)`.
+- Final: TLV `HACK_JAM_DONE 0x23` com sent + duration_sec + channel.
+
+**Fluxo**:
+```
+App ──{"cmd":"channel_jam","channel":6,"duration_sec":30}──→ ESP
+ESP ──ack {"status":"started"}──→ App
+
+  ESP fixa ch=6
+  loop por 30s:
+    [RTS broadcast, dur=32767µs] ─── ar ───→ todas STAs no ch6
+                                              ↓
+                                      NAV atualizado, STAs silenciam
+    sleep 25ms (NAV ainda válido por mais 8ms)
+  fim do loop
+  ESP ──TLV[0x23] HACK_JAM_DONE (sent=1200, dur=30, ch=6)──→ App
+```
+
+**Limitações**: não é CW puro (radio do S3 não expõe modo CW user-friendly).
+Stations modernas com 802.11 mais robusto podem ignorar RTS sem CTS de
+volta (MAC reset). Adapters em modo monitor não são afetados (não respeitam
+NAV — só TX). Cap de 120s pra não esquentar demais o módulo.
+
+---
+
 ## `wifi_connect` / `wifi_disconnect` — associação STA
 
 **O que faz**: associa o ESP como cliente WiFi 2.4GHz numa rede WPA/WPA2-PSK
@@ -311,6 +364,52 @@ chave verdadeira) → vítima sem internet.
 **Limitações**: redes corporativas com Dynamic ARP Inspection (DAI) ou
 ARP Inspection no switch silenciosamente bloqueiam. Só `drop` mode (modo
 `throttle` com forwarding+rate-limit ainda no roadmap — precursor do MITM).
+
+---
+
+## `arp_throttle` — internet intermitente via cycle on/off
+
+**O que faz**: mesma ideia do `arp_cut`, mas alterna entre fases ON
+(cache poisoned, vítima sem internet) e OFF (cache restaurado, vítima
+volta). Resultado: vítima tem internet "que falha" — bandwidth efetivo
+fica ~`off_ms / (on_ms + off_ms)` da capacidade total.
+
+**Como funciona**:
+- Fase ON (default 5000ms): mesmo loop do `arp_cut`. Manda 2 ARP replies
+  fake (poison vítima + poison gateway) a cada 1s.
+- Fase OFF (default 5000ms): manda **1 par** de ARP replies *corretivas*
+  com os MACs reais — restaura o cache da vítima e do gateway. Fica
+  inerte por off_ms.
+- Repete até `duration_sec`.
+
+**Cleanup**: ao final (timeout ou stop), envia 1 par corretivo extra pra
+não deixar a vítima offline depois do ataque.
+
+**Implementação** (`attack_lan.c`):
+- Estrutura separada `s_thr` para não conflitar com `s_cut`.
+- Helpers `send_arp_poison()` e `send_arp_restore()` reusam o
+  `send_arp_reply()` original.
+- Task `arp_throttle_task` com 2 loops aninhados (poison loop + sleep loop).
+- `wifi_disconnect` para `s_thr.stop = true` também.
+
+**Fluxo**:
+```
+App ──{"cmd":"arp_throttle","on_ms":5000,"off_ms":5000,...}──→ ESP
+ESP ──ack {"status":"started"}──→ App
+
+  loop até duration_sec:
+    [ON 5s]: poison.repeat 1s/par   → vítima offline
+    [OFF 5s]: restore + idle         → vítima online
+    [ON 5s]: poison.repeat ...
+    ...
+  cleanup: 1 último restore         → vítima volta normal
+```
+
+**Limitações**: vítima percebe instabilidade óbvia (não é stealth).
+Apps com retry agressivo (browsers) podem mascarar parcialmente o efeito
+durante fases curtas de OFF. Não é "rate limit" stricto-sensu (não
+limita KB/s — limita uptime%). Real packet forwarding com token bucket
+fica como precursor do MITM streaming, ainda na lista.
 
 ---
 
@@ -572,6 +671,92 @@ ativa — então MAC é fixo durante o spam. iOS coalesce popups por MAC, então
 após alguns cycles o popup para de aparecer mesmo continuando o spam.
 Workaround sério precisaria controle de adv address private resolvable
 ou desconectar o app durante o spam.
+
+---
+
+## `ble_spam_samsung` — Samsung EasySetup popup spam
+
+**O que faz**: gera popups de "Galaxy Buds detectados" / "smart device
+nearby" em phones Samsung.
+
+**Como funciona** (Samsung EasySetup proximity):
+- Samsung phones (com app SmartThings/Galaxy Wearable) escutam BLE adv com:
+  - Manufacturer Data Company ID `0x0075` (Samsung Electronics)
+  - Subtype/payload identificando Galaxy Buds / Galaxy Watch
+- Phone mostra popup automático com modelo detectado.
+
+**Payload** (11 bytes): `[75 00] [01 00] [02 00] [model_3B] [01] [42]`
+- `75 00`: company ID Samsung (LE)
+- `01 00 02 00`: header EasySetup
+- `model_3B`: identificador (Buds Live `A9 01 55`, Buds Pro `CD 01 55`, etc)
+- `01 42`: trailer
+
+**Implementação** (`hacking_ble.c`):
+- 5 modelos pré-definidos. Loop async, igual `apple_spam`.
+- Cada cycle pick random model + adv com mfg_data, 100ms delay.
+- Final: TLV `HACK_BLE_SPAM_DONE 0x22` com `vendor=1`.
+
+**Fluxo**: análogo ao `ble_spam_apple`, mas mfg_data Samsung.
+
+**Limitações**: só funciona em phones Samsung com SmartThings/Galaxy
+Wearable instalado e com BLE proximity habilitado. Coalesce por MAC
+(NimBLE não permite mudar MAC em conexão GATT ativa) — popups param
+após ~5 cycles em alvo único.
+
+---
+
+## `ble_spam_google` — Google Fast Pair popup spam
+
+**O que faz**: gera popups de "Pixel Buds detectados" em Android com
+Google Play Services + Fast Pair habilitado.
+
+**Como funciona** (Google Fast Pair):
+- Android escuta BLE adv com **Service Data** (não mfg_data) UUID
+  `0xFE2C` (Google LLC).
+- Body: 3 bytes de Model ID + payload variável (account_key, etc).
+- GMS lookup do Model ID na cloud → mostra popup com nome+imagem do device.
+
+**Adv layout** (Service Data IE):
+```
+[02 01 06]              ← flags
+[len 0x09] [type 0x16]  ← Service Data IE header
+[2C FE]                 ← UUID 0xFE2C (LE)
+[3B model_id]           ← e.g. CD 82 56 = Pixel Buds A
+[3B random]             ← random tail (Fast Pair v1 usa account_key bloom filter aqui)
+```
+
+NimBLE não tem campo direto pra svc_data 16-bit em `ble_hs_adv_fields`,
+então usamos `ble_gap_adv_set_data(raw, len)` montando o adv packet manualmente.
+
+**Implementação** (`hacking_ble.c`):
+- 5 model IDs (Pixel Buds A, Pro, etc).
+- `spam_one_cycle_svc_data()` constrói adv raw de 12 bytes.
+- Final: TLV `HACK_BLE_SPAM_DONE 0x22` com `vendor=2`.
+
+**Limitações**: só Android com Fast Pair on. Account key bloom filter
+ausente (não tentamos forjar pareamento real, só popup). Random tail
+muda a cada cycle, então phone vê adv "novo" sempre — mas coalesce
+por MAC mesmo assim.
+
+---
+
+## `ble_spam_multi` — Apple + Samsung + Google aleatório por cycle
+
+**O que faz**: cobertura máxima de vítimas com 1 só comando — cada cycle
+pick random vendor (Apple/Samsung/Google) + random model dentro.
+
+**Implementação** (`hacking_ble.c`):
+- `spam_dispatch(cycles, BLE_SPAM_VENDOR_MULTI)` cria task com vendor=multi.
+- Dentro do loop: `esp_random() % 3` → escolhe vendor → chama
+  `run_apple_cycle / run_samsung_cycle / run_google_cycle`.
+- Final: TLV `HACK_BLE_SPAM_DONE 0x22` com `vendor=0xFF`.
+
+**Fluxo**: idêntico ao apple/samsung/google, só com vendor aleatório.
+
+**Limitações**: como combina mfg_data (Apple/Samsung) + svc_data (Google)
+e troca a cada 100ms, há chance de o phone alvo perder o popup específico
+durante o ciclo. Para target dedicado a um vendor único, é melhor usar
+o comando específico (`ble_spam_apple`).
 
 ---
 

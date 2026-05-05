@@ -43,6 +43,7 @@ typedef enum {
     TLV_MSG_HACK_DEAUTH_DONE   = 0x20,
     TLV_MSG_HACK_BEACON_DONE   = 0x21,
     TLV_MSG_HACK_BLE_SPAM_DONE = 0x22,
+    TLV_MSG_HACK_JAM_DONE      = 0x23,
     // demais tipos serão adicionados conforme features são entregues.
 } tlv_msg_type_t;
 

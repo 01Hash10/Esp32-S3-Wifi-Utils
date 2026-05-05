@@ -88,7 +88,7 @@ ou removidos ao longo do projeto.
 ### LAN-level (atacante associado à rede)
 - [x] WiFi STA connect/disconnect (`wifi_connect`/`wifi_disconnect`)
 - [x] ARP poisoning / NetCut — modo "drop" (`arp_cut` / `arp_cut_stop`)
-- [ ] ARP poisoning — modo "throttle" (forwarding com rate limit)
+- [x] ARP poisoning — modo "throttle" (cycle on/off de poisoning, internet intermitente na vítima) — `arp_throttle`
 - [x] LAN host discovery — ARP scan no /24 (`lan_scan`)
 
 ### Demais
@@ -98,7 +98,7 @@ ou removidos ao longo do projeto.
 - [ ] Evil twin / Captive portal (AP fake + DNS hijack)
 - [ ] Karma attack (responde a probes com SSIDs procurados)
 - [ ] WPS attack (Pixie Dust — viabilidade no S3 a confirmar)
-- [ ] Channel jamming (CW transmit)
+- [x] Channel jamming via RTS NAV-lock (`channel_jam`) — não é CW puro mas trava airtime efetivamente
 
 ## Phase 4 — Hacking BLE
 
@@ -106,9 +106,9 @@ ou removidos ao longo do projeto.
   cycles), validação visual em iPhone pendente. Limitação: MAC fixo durante
   o spam (NimBLE não permite mudar addr enquanto há GATT conectado),
   iPhone pode coalescer popups por MAC.
-- [ ] BLE spam — Samsung EasySetup
-- [ ] BLE spam — Google Fast Pair
-- [ ] BLE spam — multi-vendor concorrente
+- [x] BLE spam — Samsung EasySetup (`ble_spam_samsung`)
+- [x] BLE spam — Google Fast Pair (`ble_spam_google`)
+- [x] BLE spam — multi-vendor concorrente (`ble_spam_multi` — random Apple/Samsung/Google por cycle)
 - [ ] BLE advertising flood (DoS via canal congestion)
 - [ ] BLE active scan abuse (probe → captura de scan response)
 
