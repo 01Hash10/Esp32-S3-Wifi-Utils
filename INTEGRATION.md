@@ -105,7 +105,7 @@ Frame:
 | `hello` | `seq` | `{"resp":"hello","seq":N,"fw":...,"idf":...,"chip":...,"cores":N,"rev":N}` | 1 |
 | `status` | `seq` | `{"resp":"status","seq":N,"uptime_ms":N,"free_sram":N,"free_psram":N,"min_free_sram":N}` | 1 |
 | `wifi_scan` | `seq`, `mode` (opcional, `"active"`/`"passive"`, default `"active"`), `channel` (opcional, 0=todos / 1–13=specific, default 0) | `{"resp":"wifi_scan","seq":N,"status":"started"}` (ack imediato; resultados via `stream`). Passivo é silencioso (sem probe req) mas demora ~360ms por canal. | 2 |
-| `ble_scan` | `seq`, `duration_sec` (opcional, default 10, max 599; 0 = até `ble_scan_stop`) | `{"resp":"ble_scan","seq":N,"status":"started"}` | 2 |
+| `ble_scan` | `seq`, `mode` (opcional, `"passive"`/`"active"`, default `"passive"`), `duration_sec` (opcional, default 10, max 599; 0 = até `ble_scan_stop`) | `{"resp":"ble_scan","seq":N,"status":"started"}`. Active envia scan_request → captura scan_response (nome completo, etc). | 2 |
 | `ble_scan_stop` | `seq` | `{"resp":"ble_scan_stop","seq":N,"status":"started"}` (encerra scan em andamento) | 2 |
 | `deauth` | `seq`, `bssid` (string), `target` (string, opcional, default broadcast), `channel` (1–14), `count` (opcional, default 10, max 1000), `reason` (opcional, default 7) | `{"resp":"deauth","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_DEAUTH_DONE` no `stream`). Roda em task assíncrona pra não bloquear BLE. | 3 |
 | `beacon_flood` | `seq`, `channel` (1–14), `ssids` (array de strings, 1–32, cada uma ≤32 bytes), `cycles` (opcional, default 50, max 200) | `{"resp":"beacon_flood","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_BEACON_DONE` no `stream`). Async. | 3 |
@@ -275,6 +275,7 @@ Toda resposta de erro segue o schema:
 | 10 | `name_len` | `name` | UTF-8 do nome anunciado (vazio se ausente) |
 | 10+nL | 1 | `mfg_data_len` | uint8, max 30 |
 | 11+nL | `mfg_data_len` | `mfg_data` | bytes brutos; primeiros 2 bytes = company ID little-endian (ex: `004c` = Apple, `0075` = Samsung, `00e0` = Google) |
+| 11+nL+mL | 1 | `tracker` | bit0=Apple Find My (mfg_data Apple subtype 0x12), bit1=Samsung SmartTag (svc_data UUID 0xFD5A), bit2=Tile (CID 0x0067), bit3=Chipolo (CID 0x07E6). **Adicionado em 2026-05-05** (apps antigos que param em mfg_data não veem o byte) |
 
 > Apenas a primeira aparição de cada MAC durante um scan é emitida (dedup
 > interno). Limite de 64 MACs únicos por scan; ao exceder, o firmware
@@ -543,3 +544,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 4 | Comandos `ble_spam_samsung`, `ble_spam_google`, `ble_spam_multi`. Reusam pipeline do apple_spam. TLV `HACK_BLE_SPAM_DONE 0x22` ganhou byte `vendor` no payload (0=Apple, 1=Samsung, 2=Google, 0xFF=multi). Backward-compat: app antigo que só lia 4B continua funcionando. |
 | 2026-05-05 | Phase 1 | Heartbeat bidirecional: TLV `HEARTBEAT 0x00` emitido pelo firmware a cada 5s no `stream` (uptime + free SRAM/PSRAM). App detecta liveness sem polling. Reverso (app→firmware) continua via `ping`. |
 | 2026-05-05 | Phase 2 | `wifi_scan` ganha args opcionais `mode` (`active`/`passive`) e `channel` (0/1–13). TLV `WIFI_SCAN_AP 0x10` ganha 1 byte `flags` no final (hidden, WPS, phy_11b, phy_11n) — backward-compat (apps antigos que param em ssid não veem o byte). |
+| 2026-05-05 | Phase 2 | `ble_scan` ganha arg `mode` (`active`/`passive`). TLV `BLE_SCAN_DEV 0x12` ganha 1 byte `tracker` no final classificando AirTag/SmartTag/Tile/Chipolo — backward-compat. |

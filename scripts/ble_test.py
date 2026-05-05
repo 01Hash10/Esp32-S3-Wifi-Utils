@@ -79,6 +79,13 @@ def decode_ble_dev(payload: bytes) -> dict:
     off = 10 + name_len
     mfg_len = payload[off]; off += 1
     mfg_data = bytes(payload[off:off + mfg_len])
+    off += mfg_len
+    tracker = payload[off] if off < len(payload) else 0
+    tracker_str = []
+    if tracker & 0x01: tracker_str.append("AppleFindMy")
+    if tracker & 0x02: tracker_str.append("SamsungSmartTag")
+    if tracker & 0x04: tracker_str.append("Tile")
+    if tracker & 0x08: tracker_str.append("Chipolo")
     company_id = None
     company = ""
     if mfg_len >= 2:
@@ -87,6 +94,7 @@ def decode_ble_dev(payload: bytes) -> dict:
     return {
         "mac": mac, "addr_type": addr_type, "rssi": rssi, "flags": flags,
         "name": name, "company": company, "mfg_data": mfg_data,
+        "tracker": tracker, "tracker_str": ",".join(tracker_str) or "-",
     }
 
 
@@ -184,7 +192,7 @@ async def run_ping(client: BleakClient):
             devs.append(d)
             name = d['name'] or "<no-name>"
             extra = f" mfg={d['company']}" if d['company'] else ""
-            print(f"  DEV  mac={d['mac']} rssi={d['rssi']:>4} addr_t={d['addr_type']} name={name!r}{extra}")
+            print(f"  DEV  mac={d['mac']} rssi={d['rssi']:>4} addr_t={d['addr_type']} name={name!r}{extra} tracker=[{d['tracker_str']}]")
         elif mtype == 0x13:
             done = decode_ble_done(payload)
             print(f"\nBLE_SCAN_DONE: {done['dev_count']} devs in {done['scan_ms']}ms (status={done['status']})")

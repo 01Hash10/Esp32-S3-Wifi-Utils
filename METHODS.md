@@ -215,30 +215,70 @@ suporta single-channel ou all (não range arbitrário — limitação do
 
 ---
 
-## `ble_scan` — passive discovery de devices BLE
+## `ble_scan` — discovery passivo/ativo + tracker classification
 
-**O que faz**: lista devices BLE anunciando próximo (mac, rssi, name, mfg_data).
+**O que faz**: lista devices BLE anunciando próximo (mac, rssi, name,
+mfg_data) + classifica trackers conhecidos (Apple Find My, Samsung
+SmartTag, Tile, Chipolo) emitindo bitmask `tracker` no payload.
 
-**Como funciona**: GAP discovery passivo — apenas escuta advertising packets.
-Não envia scan_request, então não polui o canal nem revela nossa presença.
+**Como funciona**:
+- **Passive**: GAP discovery silencioso, só escuta advertising packets.
+- **Active**: ESP envia scan_request → device retorna scan_response com
+  payload extra (frequentemente o nome completo ou IDs adicionais).
+  Mais info, mas anuncia presença do ESP.
+
 Devices anunciam:
-- Flags
+- Flags (Limited/General Discoverable, BR/EDR Not Supported, etc)
 - Local name (Complete ou Shortened)
-- Manufacturer Data (com Company ID nos 2 primeiros bytes LE)
-- Service UUIDs
+- Manufacturer Data (Company ID 2B LE + payload vendor-specific)
+- Service UUIDs (16/32/128-bit)
+- Service Data (UUID + payload)
+
+**Tracker classification** (`classify_tracker()` em `scan_ble.c`):
+
+| Tracker | Sinal procurado | Bit |
+|---|---|---|
+| Apple Find My (AirTag) | mfg_data Apple `4C 00` + subtype `0x12` (Offline Finding) | 0 |
+| Samsung SmartTag | svc_data UUID `0xFD5A` (Samsung Find) | 1 |
+| Tile | mfg_data Company ID `0x0067` (LE: `67 00`) | 2 |
+| Chipolo | mfg_data Company ID `0x07E6` (LE: `E6 07`) | 3 |
 
 **Implementação** (`scan_ble.c`):
-- `ble_gap_disc(BLE_OWN_ADDR_PUBLIC, duration_ms, params, cb)` com `passive=1`.
+- API: `scan_ble_start_ex(mode, duration_sec)`.
+- `ble_gap_disc(BLE_OWN_ADDR_PUBLIC, duration_ms, params, cb)` com
+  `passive = (mode == PASSIVE) ? 1 : 0`.
 - `BLE_GAP_EVENT_DISC` para cada packet recebido.
 - `ble_hs_adv_parse_fields()` extrai os campos.
 - Dedup por MAC (linear scan em buffer estático de 64 entries).
-- Cada device único emite TLV `BLE_SCAN_DEV 0x12`.
+- `classify_tracker()` retorna bitmask.
+- Cada device único emite TLV `BLE_SCAN_DEV 0x12` com tracker byte
+  apended ao final do payload (backward-compat).
 - Ao final: `BLE_SCAN_DONE 0x13`. Status=1 se truncou (>64 únicos).
 
-**Fluxo**: análogo ao wifi_scan. Status=1 se passou de 64 MACs únicos.
+**Fluxo**:
+```
+App ──{"cmd":"ble_scan","mode":"active","duration_sec":15}──→ ESP
+ESP ──ack──→ App
 
-**Limitações**: não vê scan responses (precisaria ativo). 64 unique cap
-no firmware (memória estática) — app pode chamar várias vezes pra ampliar.
+  ESP scan ativo:
+    BLE_GAP_EVENT_DISC: peripheral X →
+      ble_hs_adv_parse_fields() →
+      classify_tracker() bitmask
+      emit TLV[0x12] BLE_SCAN_DEV (mac, rssi, name, mfg_data, tracker=0x01)
+    
+    [se active]: ESP envia scan_request a X
+    BLE_GAP_EVENT_DISC: scan_response de X (extra data)
+    (mesma classificação, novo TLV se MAC ainda não visto)
+  
+  ESP ──TLV[0x13] BLE_SCAN_DONE──→ App
+```
+
+**Limitações**: 64 unique cap no firmware (memória estática). Active
+scan polui o canal e o ESP fica visível pra outros scanners. Tracker
+classification é heurística baseada em company IDs/UUIDs — pode dar
+falso-positivo (ex: outro device usando mfg_data Apple subtype 0x12).
+Tracker following (mesmo device acompanhando você) requer agregação
+multi-scan no app — firmware só fornece sinal pontual.
 
 ---
 

@@ -114,12 +114,21 @@ static void handle_wifi_scan(cJSON *root)
 static void handle_ble_scan(cJSON *root)
 {
     int seq = seq_of(root);
-    cJSON *dur = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+    cJSON *dur    = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+    cJSON *mode_j = cJSON_GetObjectItemCaseSensitive(root, "mode");
+
     uint16_t duration = 10; // default 10s
     if (cJSON_IsNumber(dur) && dur->valueint >= 0 && dur->valueint < 600) {
         duration = (uint16_t)dur->valueint;
     }
-    esp_err_t err = scan_ble_start(duration);
+    scan_ble_mode_t mode = SCAN_BLE_MODE_PASSIVE;
+    if (cJSON_IsString(mode_j) && mode_j->valuestring) {
+        if (strcmp(mode_j->valuestring, "active") == 0)        mode = SCAN_BLE_MODE_ACTIVE;
+        else if (strcmp(mode_j->valuestring, "passive") == 0)  mode = SCAN_BLE_MODE_PASSIVE;
+        else { send_err(seq, "bad_mode", "active|passive"); return; }
+    }
+
+    esp_err_t err = scan_ble_start_ex(mode, duration);
     if (err == ESP_OK) {
         send_ack(seq, "ble_scan");
     } else if (err == ESP_ERR_INVALID_STATE) {

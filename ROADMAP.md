@@ -56,16 +56,16 @@ ou removidos ao longo do projeto.
 
 ### BLE
 - [x] Scan passivo (NimBLE GAP discover)
-- [ ] Scan ativo (com scan request)
-- [x] Parsing de advertising data (flags, name, mfg data)
-- [ ] Fingerprint por mfg data (Apple, Samsung, Google, etc) — pode ser no app
-- [ ] Detecção de AirTags / SmartTags
-- [ ] Detecção de tracker following (RSSI seguindo no tempo)
-- [ ] Stream contínuo pro app
+- [x] Scan ativo (`ble_scan` com `mode:"active"` — captura scan_response)
+- [x] Parsing de advertising data (flags, name, mfg data, svc data)
+- [ ] Fingerprint por mfg data (Apple, Samsung, Google, etc) — **lado-app** (tabela de Company IDs IEEE)
+- [x] Detecção de AirTags / SmartTags / Tile / Chipolo (flag `tracker` no `BLE_SCAN_DEV`)
+- [ ] Detecção de tracker following (RSSI seguindo no tempo) — **lado-app** (agregação multi-scan)
+- [x] Stream contínuo pro app
 
 ### Análise / classificação
-- [ ] Threat classifier WiFi: open, WEP, WPS, hidden, beacon anomalies
-- [ ] Threat classifier BLE: tracker, spam signatures, devices unknown
+- [ ] Threat classifier WiFi: open, WEP, WPS, hidden, beacon anomalies — **lado-app** (firmware já fornece authmode + flags hidden/WPS; classifier é regra de negócio do app)
+- [ ] Threat classifier BLE: tracker, spam signatures, devices unknown — **lado-app** (firmware já fornece flags `tracker` + mfg_data; assinatura de spam é regra do app)
 
 ## Phase 3 — Hacking WiFi
 
