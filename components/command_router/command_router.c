@@ -891,6 +891,24 @@ static void handle_ble_spam_multi(cJSON *root)
     dispatch_ble_spam(root, "ble_spam_multi", hacking_ble_multi_spam);
 }
 
+static void handle_ble_adv_flood(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *dur_j = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 10;
+    if (dur < 1)  dur = 1;
+    if (dur > 60) dur = 60;
+
+    esp_err_t err = hacking_ble_adv_flood((uint16_t)dur);
+    if (err == ESP_OK) {
+        send_ack(seq, "ble_adv_flood");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "spam_busy", NULL);
+    } else {
+        send_err(seq, "spam_failed", esp_err_to_name(err));
+    }
+}
+
 static void handle_beacon_flood(cJSON *root)
 {
     int seq = seq_of(root);
@@ -1012,6 +1030,8 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_ble_spam_google(root);
     } else if (strcmp(c, "ble_spam_multi") == 0) {
         handle_ble_spam_multi(root);
+    } else if (strcmp(c, "ble_adv_flood") == 0) {
+        handle_ble_adv_flood(root);
     } else if (strcmp(c, "wifi_connect") == 0) {
         handle_wifi_connect(root);
     } else if (strcmp(c, "wifi_disconnect") == 0) {

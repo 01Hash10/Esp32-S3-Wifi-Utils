@@ -159,8 +159,8 @@ ou removidos ao longo do projeto.
 - [x] BLE spam — Samsung EasySetup (`ble_spam_samsung`)
 - [x] BLE spam — Google Fast Pair (`ble_spam_google`)
 - [x] BLE spam — multi-vendor concorrente (`ble_spam_multi` — random Apple/Samsung/Google por cycle)
-- [ ] BLE advertising flood (DoS via canal congestion)
-- [ ] BLE active scan abuse (probe → captura de scan response)
+- [x] BLE advertising flood (`ble_adv_flood` — DoS via channel congestion: random adv data + interval mínimo 20ms × 3 canais ≈ 75 PDUs/s, cap 60s)
+- [x] BLE active scan abuse (já coberto pelo `ble_scan mode=active` da Phase 2 — envia scan_request e captura scan_response que muitas vezes traz info adicional)
 
 ## Phase 5 — Defense (Detection-only)
 

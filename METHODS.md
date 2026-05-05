@@ -462,6 +462,7 @@ ESP ──ack started──→ App
 - [Samsung EasySetup spam (`ble_spam_samsung`)](#ble_spam_samsung--samsung-easysetup-popup-spam)
 - [Google Fast Pair spam (`ble_spam_google`)](#ble_spam_google--google-fast-pair-popup-spam)
 - [Multi-vendor BLE spam (`ble_spam_multi`)](#ble_spam_multi--apple--samsung--google-aleatorio-por-cycle)
+- [BLE adv flood (`ble_adv_flood`)](#ble_adv_flood--dos-via-channel-congestion)
 
 ---
 
@@ -1286,6 +1287,68 @@ pick random vendor (Apple/Samsung/Google) + random model dentro.
 e troca a cada 100ms, há chance de o phone alvo perder o popup específico
 durante o ciclo. Para target dedicado a um vendor único, é melhor usar
 o comando específico (`ble_spam_apple`).
+
+---
+
+## `ble_adv_flood` — DoS via channel congestion
+
+**O que faz**: spamma advs BLE com payload aleatório no rate máximo
+permitido (interval 20ms). Diferente dos `ble_spam_*` que tentam
+triggerar popups específicos, aqui o objetivo é **saturar os canais
+BLE de advertising (37/38/39)** — devices BLE legítimos perto sofrem
+pra anunciar ou ser descobertos.
+
+**Como funciona** (BLE 5 advertising):
+- BLE adv é transmitido nos 3 canais primários (37, 38, 39 = 2402, 2426,
+  2480 MHz). Controllers escolhem qual canal por adv event.
+- Adv interval mínimo prático: 20ms (configurável via `itvl_min`/`itvl_max`
+  em unidades de 0.625ms = `0x20`).
+- Cada cycle de set_data + adv_start dispara 1 adv event nos canais
+  configurados (default: todos 3 = 3 PDUs).
+
+**Implementação** (`hacking_ble.c`):
+- Async via FreeRTOS task. Cap duration_sec=60 pra não esquentar.
+- Loop tight (40ms entre cycles → ~25 cycles/s × 3 canais ≈ 75 PDUs/s):
+  - Gera 31 bytes random (`esp_random()`).
+  - Sanitiza primeiro IE: `length` em range plausível (2–29) + `type` random,
+    pra evitar rejeição do controller.
+  - `ble_gap_adv_stop` + `ble_gap_adv_set_data(adv, 31)` + `ble_gap_adv_start`
+    (non-conn, non-disc, itvl_min/max=0x20).
+- Pausa GATT adv no início, retoma com `transport_ble_advertising_resume`
+  ao final (mesmo padrão do spam_apple).
+- TLV `BLE_FLOOD_DONE 0x2F` (sent + duration_sec).
+
+**Fluxo**:
+```
+App ──{"cmd":"ble_adv_flood","duration_sec":15}──→ ESP
+ESP ──ack started──→ App
+
+  ESP pausa GATT adv
+  loop por 15s:
+    gen 31 random bytes
+    set_data + adv_start (itvl 20ms)
+    sleep 40ms
+  ESP retoma GATT adv
+  ESP ──TLV[0x2F] BLE_FLOOD_DONE (sent=375, duration_sec=15)──→ App
+```
+
+**Limitações**:
+- Random bytes podem ser rejeitados pelo controller em casos extremos
+  (length byte inconsistente, etc) — sanitização cobre os casos mais
+  comuns mas não garante 100%.
+- iOS/Android scanners modernos têm filtragem de adv malformado —
+  conta como ruído mas pode não impedir descoberta de device legítimo.
+- 60s cap evita aquecimento, mas mesmo 60s é bem agressivo pra
+  módulos BLE — deixar a placa ventilada.
+- Não muda MAC (NimBLE não permite com GATT conectado), então 1 device
+  consistente. Detect/block fácil pra defesas que filtram por MAC.
+- Active scan abuse: Phase 4 listou separadamente, mas já está coberto
+  pelo `ble_scan mode=active` (Phase 2) — captura scan_responses dos
+  peripherals próximos enviando scan_request.
+
+**Combinação natural**:
+- Em paralelo com `channel_jam` (canal WiFi adjacente 2.4GHz) → DoS
+  multi-camada na vizinhança.
 
 ---
 

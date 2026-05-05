@@ -55,6 +55,7 @@ typedef enum {
     TLV_MSG_WPS_TEST_DONE      = 0x2C,
     TLV_MSG_PORTAL_DNS_QUERY   = 0x2D,
     TLV_MSG_PORTAL_HTTP_REQ    = 0x2E,
+    TLV_MSG_BLE_FLOOD_DONE     = 0x2F,
 
     // Captura/dados (0x40–0x4F): streaming de pcap chunks.
     TLV_MSG_PCAP_FRAME         = 0x40,

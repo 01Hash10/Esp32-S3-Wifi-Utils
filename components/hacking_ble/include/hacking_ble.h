@@ -41,4 +41,15 @@ esp_err_t hacking_ble_google_spam(uint16_t cycles);
 // Cobre o máximo de vítimas em volta com 1 só comando.
 esp_err_t hacking_ble_multi_spam(uint16_t cycles);
 
+// BLE adv flood — DoS via channel congestion. Loop tight de adv com
+// payload aleatório + interval mínimo (20ms). Diferente dos spam_*
+// (que tentam triggerar popups específicos), este é puro flood — mata
+// detectabilidade no canal pra outros devices BLE.
+//
+// Async, pausa GATT adv durante a sessão, retoma ao final.
+//
+// @param duration_sec 1..60 (cap pra não esquentar a placa)
+// @return ESP_ERR_INVALID_STATE se outro spam/flood ainda rodando.
+esp_err_t hacking_ble_adv_flood(uint16_t duration_sec);
+
 bool hacking_ble_busy(void);

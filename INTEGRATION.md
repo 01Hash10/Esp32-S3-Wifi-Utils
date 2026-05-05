@@ -113,6 +113,7 @@ Frame:
 | `ble_spam_samsung` | `seq`, `cycles` (default 50, max 500) | Idem, vendor=1 no DONE. Galaxy Buds popups em phones Samsung. | 4 |
 | `ble_spam_google` | `seq`, `cycles` (default 50, max 500) | Idem, vendor=2 no DONE. Pixel Buds popups em Android com Fast Pair. | 4 |
 | `ble_spam_multi` | `seq`, `cycles` (default 50, max 500) | Idem, vendor=255 (multi). Cada cycle escolhe Apple/Samsung/Google aleatoriamente. | 4 |
+| `ble_adv_flood` | `seq`, `duration_sec` (opcional, 1–60, default 10) | `{"resp":"ble_adv_flood","seq":N,"status":"started"}` (ack imediato; final via TLV `BLE_FLOOD_DONE` em `stream`). DoS via channel congestion: payload aleatório, interval mínimo (20ms), cap 60s pra não fritar. | 4 |
 | `wifi_connect` | `seq`, `ssid`, `password` (opcional para abertas), `timeout_ms` (opcional, default 15000, range 1000–60000) | `{"resp":"wifi_connect","seq":N,"status":"connected","ip":"x.x.x.x","gateway":"x.x.x.x","mac":"aa:bb:..."}`. Ou `err: wifi_timeout`/`wifi_failed`. ESP fica como STA até `wifi_disconnect`. | 3 |
 | `wifi_disconnect` | `seq` | `{"resp":"wifi_disconnect","seq":N,"status":"disconnected"}`. Para qualquer `arp_cut` ativo também. | 3 |
 | `arp_cut` | `seq`, `target_ip` (string IPv4), `target_mac` (string), `gateway_ip`, `gateway_mac`, `interval_ms` (100–5000, default 1000), `duration_sec` (1–600, default 60) | `{"resp":"arp_cut","seq":N,"status":"started",...}`. Roda em task assíncrona. Requer `wifi_connect` antes. Modo "drop": ESP não encaminha tráfego. | 3 |
@@ -228,6 +229,7 @@ Toda resposta de erro segue o schema:
 | `0x2C` | `WPS_TEST_DONE` | device → app | resultado do `wps_pin_test` (status + ssid + psk se sucesso) | 3 |
 | `0x2D` | `PORTAL_DNS_QUERY` | device → app | DNS query recebida pelo captive portal (src_ip + domínio) | 3 |
 | `0x2E` | `PORTAL_HTTP_REQ` | device → app | HTTP request (src_ip + method + path + body chunk) | 3 |
+| `0x2F` | `BLE_FLOOD_DONE` | device → app | resumo final do `ble_adv_flood` (sent + duration_sec) | 4 |
 | `0x40` | `PCAP_FRAME` | device → app | 1 frame 802.11 capturado pelo `pcap_start`, com timestamp relativo | 2 |
 | `0x41` | `PCAP_DONE` | device → app | resumo final do `pcap_start` (emitted/dropped/elapsed) | 2 |
 
@@ -480,6 +482,13 @@ Toda resposta de erro segue o schema:
 | 0 | 6 | `mac` | MAC do client que saiu (BE) |
 | 6 | 1 | `reason` | reason code 802.11 (1=unspecified, 7=class3 frame, etc) |
 
+### `0x2F BLE_FLOOD_DONE` — payload (4 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `sent` | uint16 BE, cycles em que adv foi disparado com sucesso |
+| 2 | 2 | `duration_sec` | uint16 BE, duração configurada |
+
 ### `0x2D PORTAL_DNS_QUERY` — payload (variável, 5..69 bytes)
 
 | Offset | Tamanho | Campo | Descrição |
@@ -678,3 +687,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3 | Comandos `evil_twin_start` / `evil_twin_stop`: SoftAP fake (modo APSTA) com SSID/canal/password configurável + DHCP automático. Novos TLVs `EVIL_CLIENT_JOIN 0x26` (mac+aid) e `EVIL_CLIENT_LEAVE 0x27` (mac+reason) emitidos quando devices entram/saem do AP. Captive portal (DNS hijack + HTTP) é feature separada futura. |
 | 2026-05-05 | Phase 3 | Comando `wps_pin_test`: testa 1 PIN WPS contra um BSSID via supplicant do IDF (modo enrollee). Emite TLV `WPS_TEST_DONE 0x2C` com status + (em sucesso) SSID + PSK descobertos. Pixie Dust nativo marcado [blocked - lib limitation]: API IDF não expõe M2 cru; workaround = `pcap_start` + `pixiewps` offline. |
 | 2026-05-05 | Phase 3 | Comandos `captive_portal_start` / `captive_portal_stop`: complementa `evil_twin` com DNS hijack (UDP:53 redireciona tudo pro AP) + HTTP server (TCP:80 serve HTML configurável). Cada DNS query → TLV `PORTAL_DNS_QUERY 0x2D`; cada HTTP req → TLV `PORTAL_HTTP_REQ 0x2E` com body chunk de até 130B (captura POST forms com credenciais). |
+| 2026-05-05 | Phase 4 | Comando `ble_adv_flood`: DoS via channel congestion. Loop tight de adv com payload random + interval mínimo (20ms × 3 canais ≈ 75 PDUs/s). Novo TLV `BLE_FLOOD_DONE 0x2F`. Cap duration 60s pra não fritar. Active scan abuse: já coberto pelo `ble_scan mode=active` (Phase 2). |
