@@ -10,6 +10,7 @@
 #include "captive_portal.h"
 #include "watchdog.h"
 #include "persist.h"
+#include "playbook.h"
 #include "tlv.h"
 #include "nvs.h"  // pra ESP_ERR_NVS_NOT_FOUND
 
@@ -1355,6 +1356,72 @@ static void handle_tracker_hunt(cJSON *root)
     }
 }
 
+static void handle_playbook_run(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *steps_j   = cJSON_GetObjectItemCaseSensitive(root, "steps");
+    cJSON *profile_j = cJSON_GetObjectItemCaseSensitive(root, "profile");
+
+    char *json_str = NULL;
+    bool from_profile = false;
+
+    if (cJSON_IsString(profile_j) && profile_j->valuestring[0]) {
+        // Carrega do NVS
+        char buf[PERSIST_PROFILE_MAX_BYTES + 1];
+        size_t blen = 0;
+        esp_err_t err = persist_profile_load(profile_j->valuestring,
+                                              buf, sizeof(buf), &blen);
+        if (err != ESP_OK) {
+            send_err(seq, "profile_not_found", profile_j->valuestring);
+            return;
+        }
+        json_str = malloc(blen + 1);
+        if (!json_str) { send_err(seq, "alloc_failed", NULL); return; }
+        memcpy(json_str, buf, blen);
+        json_str[blen] = 0;
+        from_profile = true;
+    } else if (cJSON_IsArray(steps_j)) {
+        // Inline — converte de volta pra string
+        json_str = cJSON_PrintUnformatted(steps_j);
+        if (!json_str) { send_err(seq, "json_print_failed", NULL); return; }
+    } else {
+        send_err(seq, "missing_steps", "steps array OR profile name");
+        return;
+    }
+
+    esp_err_t err = playbook_run(json_str);
+    if (from_profile) free(json_str);
+    else cJSON_free(json_str);
+
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "playbook_run");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "started");
+        if (from_profile) {
+            cJSON_AddStringToObject(resp, "profile", profile_j->valuestring);
+        }
+        send_json(resp); cJSON_Delete(resp);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "playbook_busy", NULL);
+    } else if (err == ESP_ERR_INVALID_SIZE) {
+        send_err(seq, "too_big", "max 4096 bytes");
+    } else {
+        send_err(seq, "playbook_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_playbook_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = playbook_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "playbook_stop");
+    } else {
+        send_err(seq, "playbook_idle", NULL);
+    }
+}
+
 static void handle_recon_full(cJSON *root)
 {
     int seq = seq_of(root);
@@ -1949,6 +2016,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_mitm_capture(root);
     } else if (strcmp(c, "tracker_hunt") == 0) {
         handle_tracker_hunt(root);
+    } else if (strcmp(c, "playbook_run") == 0) {
+        handle_playbook_run(root);
+    } else if (strcmp(c, "playbook_stop") == 0) {
+        handle_playbook_stop(root);
     } else if (strcmp(c, "evil_twin_start") == 0) {
         handle_evil_twin_start(root);
     } else if (strcmp(c, "evil_twin_stop") == 0) {

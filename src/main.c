@@ -19,6 +19,7 @@
 #include "captive_portal.h"
 #include "watchdog.h"
 #include "persist.h"
+#include "playbook.h"
 
 static const char *TAG = "boot-diag";
 
@@ -55,6 +56,7 @@ void app_main(void)
     ESP_ERROR_CHECK(captive_portal_init());
     ESP_ERROR_CHECK(watchdog_init());
     ESP_ERROR_CHECK(persist_init());
+    ESP_ERROR_CHECK(playbook_init());
 
     while (1) {
         log_mem();

@@ -151,6 +151,8 @@ Frame:
 | `deauth_storm` | `seq`, `bssid`, `target` (opcional, default broadcast), `channel` (1–14), `deauth_count` (10–500, default 50), `jam_seconds` (5–60, default 15) | `{"resp":"deauth_storm","status":"started"}`. Macro: 1 task única intercala burst de deauths + RTS jam loop pra travar canal. Não conflita com s_busy. | 3.5 |
 | `mitm_capture` | `seq`, `target_ip`, `target_mac`, `gateway_ip`, `gateway_mac`, `bssid`, `channel`, `duration_sec` (5–300, default 60) | `{"resp":"mitm_capture","status":"started","mode":"weak_drop_capture"}`. Macro: `arp_cut` modo drop + `pcap_start` filter=data bssid. Vítima fica offline mas ESP captura tudo que ela tenta enviar. **Não é MITM real** (sem forwarding); rotule como "weak". | 3.5 |
 | `tracker_hunt` | `seq`, `duration_sec` (30–3600, default 300) | `{"resp":"tracker_hunt","status":"started"}`. Versão simples: dispara `ble_scan(active)` longo. App agrega multi-scan os `BLE_SCAN_DEV` com flag `tracker` (firmware-side aggregation pendente). | 3.5 |
+| `playbook_run` | `seq`, **um de**: `steps` (array JSON inline) OU `profile` (nome de profile no NVS, carregado via `persist`) | `{"resp":"playbook_run","status":"started"[,"profile":"X"]}`. Engine despacha steps sequencial em task própria. Cada step emite TLV `PLAYBOOK_STEP_DONE 0x28`; fim emite `PLAYBOOK_DONE 0x29`. | 3.5 |
+| `playbook_stop` | `seq` | `{"resp":"playbook_stop","seq":N,"status":"started"}`. Aborta playbook em andamento. | 3.5 |
 | `evil_twin_start` | `seq`, `ssid` (1–32 chars), `password` (opcional, 8–63 chars; vazio/ausente = open), `channel` (1–13), `max_conn` (opcional, 1–10, default 4) | `{"resp":"evil_twin_start","seq":N,"status":"started","ssid":"...","channel":N,"auth":"open"\|"wpa2"}`. **Requer ESP NÃO conectado**. Cada client que associa emite TLV `EVIL_CLIENT_JOIN`; cada disconnect emite `EVIL_CLIENT_LEAVE`. DHCP automático (default 192.168.4.x). | 3 |
 | `evil_twin_stop` | `seq` | `{"resp":"evil_twin_stop","seq":N,"status":"started"}`. Encerra o AP e volta pra STA-only. | 3 |
 | `captive_portal_start` | `seq`, `html` (opcional, página HTML servida; default = formulário login simples), `redirect_ip` (opcional, default `192.168.4.1`) | `{"resp":"captive_portal_start","seq":N,"status":"started","redirect_ip":"x.x.x.x"}`. **Requer `evil_twin` ativo**. Sobe DNS:53 (responde tudo com `redirect_ip`) + HTTP:80 (serve HTML). Cada query DNS emite TLV `PORTAL_DNS_QUERY`; cada HTTP request emite `PORTAL_HTTP_REQ` (até ~130B do body — pega POST de form com credenciais). | 3 |
@@ -244,6 +246,8 @@ Toda resposta de erro segue o schema:
 | `0x25` | `KARMA_DONE` | device → app | resumo final do `karma_start` | 3 |
 | `0x26` | `EVIL_CLIENT_JOIN` | device → app | client associou ao Evil Twin AP (mac, aid) | 3 |
 | `0x27` | `EVIL_CLIENT_LEAVE` | device → app | client desassociou (mac, reason) | 3 |
+| `0x28` | `PLAYBOOK_STEP_DONE` | device → app | step do playbook concluído (idx + type + status) | 3.5 |
+| `0x29` | `PLAYBOOK_DONE` | device → app | playbook inteiro concluído (totals + status) | 3.5 |
 | `0x2C` | `WPS_TEST_DONE` | device → app | resultado do `wps_pin_test` (status + ssid + psk se sucesso) | 3 |
 | `0x2D` | `PORTAL_DNS_QUERY` | device → app | DNS query recebida pelo captive portal (src_ip + domínio) | 3 |
 | `0x2E` | `PORTAL_HTTP_REQ` | device → app | HTTP request (src_ip + method + path + body chunk) | 3 |
@@ -545,6 +549,23 @@ Toda resposta de erro segue o schema:
 > Pra capturar credenciais: `body` traz form-encoded como
 > `username=foo&password=bar`. App decodifica.
 
+### `0x28 PLAYBOOK_STEP_DONE` — payload (4 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `step_idx` | uint16 BE, índice do step (0-based) |
+| 2 | 1 | `step_type` | 0=cmd, 1=wait_ms, 2=wait_event, 3=set, 0xFF=inválido |
+| 3 | 1 | `status` | 0=ok, 1=falha, 2=stop |
+
+### `0x29 PLAYBOOK_DONE` — payload (9 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `total_steps` | uint16 BE, steps definidos no playbook |
+| 2 | 2 | `completed` | uint16 BE, steps com status=ok |
+| 4 | 1 | `status` | 0=ok (todos), 1=abort por erros, 2=stop_request |
+| 5 | 4 | `elapsed_ms` | uint32 BE |
+
 ### `0x2C WPS_TEST_DONE` — payload (variável, 9..107 bytes)
 
 | Offset | Tamanho | Campo | Descrição |
@@ -831,3 +852,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 7 | Comandos `profile_save` / `profile_load` / `profile_delete` / `profile_list`: storage NVS persistente de profiles JSON (até 1024 bytes cada, name ≤14 chars). Componente `persist` com namespace NVS "wifiutils". Novos TLVs `PROFILE_DATA 0x39`, `PROFILE_LIST_ITEM 0x3A`, `PROFILE_LIST_DONE 0x3B`. Profile content é opaco pro firmware — geralmente JSON definindo workflow pra app/playbook engine consumir. |
 | 2026-05-05 | Phase 3.5 | 4 macros novos no command_router (sem novos TLVs — cada macro reusa TLVs das primitivas que orquestra): `wpa_capture_kick` (wpa_capture + deauth), `pmkid_capture_kick` (pmkid_capture + deauth), `evil_twin_kick` (evil_twin + opcional deauth no AP legítimo), `recon_full` (wifi_scan + ble_scan + opcional lan_scan paralelos). Karma_then_twin (decisão automática) ainda pendente — exige callback API mais refinada. |
 | 2026-05-05 | Phase 3.5 | +4 macros: `karma_then_twin` (karma agrega via hook weak no sniff_wifi, decide top SSID, sobe twin), `deauth_storm` (single task com deauth burst + RTS jam intercalados — nova função `hacking_wifi_deauth_storm`), `mitm_capture` (arp_cut drop + pcap filter — modo "weak" sem forwarding real), `tracker_hunt` (ble_scan ativo longo — agregação multi-scan ainda lado-app). Phase 3.5 macros 100% — falta só playbook engine. |
+| 2026-05-05 | Phase 3.5 | Comandos `playbook_run` / `playbook_stop`: engine declarativo JSON com 4 step types (cmd/wait_ms/wait_event/set). `cmd` despacha pelo command_router localmente. `wait_event` usa hook weak `playbook_hook_tlv` em transport_ble pra esperar TLV específico. `set` armazena variáveis (até 8) com substituição `$var` em args subsequentes. Aceita `steps` inline OU `profile` (carrega do NVS via persist). Novos TLVs `PLAYBOOK_STEP_DONE 0x28` e `PLAYBOOK_DONE 0x29`. Cap 32 steps, 4096 bytes JSON, 3 erros consecutivos = abort. |

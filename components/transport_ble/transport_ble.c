@@ -251,8 +251,19 @@ void transport_ble_advertising_resume(void)
     advertise();
 }
 
+// Hook weak pro playbook engine inspecionar TLVs antes do BLE send.
+// No-op por default; playbook component override forte se linkado.
+__attribute__((weak)) void playbook_hook_tlv(uint8_t msg_type,
+                                              const uint8_t *payload, size_t len)
+{
+    (void)msg_type; (void)payload; (void)len;
+}
+
 void transport_ble_send_stream(const uint8_t *data, size_t len)
 {
+    if (len >= 4) {
+        playbook_hook_tlv(data[2], data + 4, len - 4);
+    }
     send_notify(s_stream_attr_handle, s_stream_subscribed, data, len);
 }
 

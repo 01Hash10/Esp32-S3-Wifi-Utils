@@ -48,10 +48,10 @@ typedef enum {
     TLV_MSG_KARMA_DONE         = 0x25,
     TLV_MSG_EVIL_CLIENT_JOIN   = 0x26,
     TLV_MSG_EVIL_CLIENT_LEAVE  = 0x27,
-    // 0x28 PLAYBOOK_STEP_DONE — reservado pro playbook engine (Phase 3.5)
-    // 0x29 PLAYBOOK_DONE — reservado pro playbook engine (Phase 3.5)
-    // 0x2A RECON_DONE — reservado pro macro recon_full (Phase 3.5)
-    // 0x2B TRACKER_PERSISTENT — reservado pro macro tracker_hunt (Phase 3.5)
+    TLV_MSG_PLAYBOOK_STEP_DONE = 0x28,
+    TLV_MSG_PLAYBOOK_DONE      = 0x29,
+    // 0x2A RECON_DONE — reservado pro macro recon_full (Phase 3.5, future)
+    // 0x2B TRACKER_PERSISTENT — reservado (firmware-side aggregation pendente)
     TLV_MSG_WPS_TEST_DONE      = 0x2C,
     TLV_MSG_PORTAL_DNS_QUERY   = 0x2D,
     TLV_MSG_PORTAL_HTTP_REQ    = 0x2E,

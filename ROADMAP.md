@@ -126,13 +126,11 @@ ou removidos ao longo do projeto.
 
 ### Playbook engine (médio prazo)
 
-- [ ] Comando `playbook_run`: aceita JSON com array de steps + condicionais
-- [ ] Step types: `cmd` (executa comando interno), `wait_ms`, `wait_event`
-  (TLV específico com filtros), `if`, `select_top` (pega top-N de uma
-  lista de TLVs por contagem), `loop`
-- [ ] Output: TLV `PLAYBOOK_STEP_DONE 0x28` por step + `PLAYBOOK_DONE 0x29`
-- [ ] Persistência opcional: `playbook_save` em NVS (vinculado à Phase 7)
-- [ ] Watchdog: rate-limit, timeout total, abort em N erros consecutivos
+- [x] Comando `playbook_run`: aceita JSON com array de steps (v1: 4 step types)
+- [~] Step types implementados em v1: `cmd`, `wait_ms`, `wait_event`, `set`. **Faltam** `if`/`select_top`/`loop` (futuras evoluções)
+- [x] Output: TLV `PLAYBOOK_STEP_DONE 0x28` por step + `PLAYBOOK_DONE 0x29`
+- [x] Persistência: comando aceita `profile=name` carregando do NVS via `persist`. Salvar via `profile_save` regular (Phase 7)
+- [x] Watchdog: 3 erros consecutivos = abort, `playbook_stop` cancela em qualquer step
 
 ## Phase 4 — Hacking BLE
 

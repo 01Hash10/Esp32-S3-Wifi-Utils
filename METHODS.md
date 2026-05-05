@@ -55,6 +55,7 @@ firmware, explica:
 
 ### Phase 3.5 — Macros (comandos compostos)
 - [`wpa_capture_kick` / `pmkid_capture_kick` / `evil_twin_kick` / `recon_full`](#macros-phase-35--comandos-compostos)
+- [Playbook engine (`playbook_run`)](#playbook_run--engine-declarativo-json)
 
 ### `pcap_start` — streaming de frames 802.11 via BLE
 
@@ -1003,6 +1004,100 @@ Args: `duration_sec` (30–3600, default 300).
 
 Por enquanto, app agrega correlacionando os `BLE_SCAN_DEV` entre múltiplas
 chamadas. Firmware-side fica como evolução depois.
+
+---
+
+## `playbook_run` — engine declarativo JSON
+
+**O que faz**: executa workflows declarativos sem precisar do app
+gerenciar timing/sequência. App envia 1 só comando com array de steps;
+firmware executa em ordem na própria task. Diferente dos macros
+hardcoded, é arbitrariamente combinável.
+
+**Step types (v1)**:
+
+| type | Args | O que faz |
+|---|---|---|
+| `cmd` | `cmd`, `args:{...}` | Despacha comando pelo command_router local. args mergeados com `cmd` + `seq:-1`. |
+| `wait_ms` | `ms` (0–600000) | `vTaskDelay`. |
+| `wait_event` | `tlv` (msg_type), `timeout_ms` (100–600000, default 30s) | Aguarda TLV específico via hook weak no transport_ble. Falha por timeout. |
+| `set` | `name` (`$var`), `value` (string/number) | Armazena variável (max 8). |
+
+**Variáveis**: strings começando com `$` em qualquer arg de step
+subsequente são substituídas pelo último value setado via `set`. Útil
+pra encadear: capturar valor num step, usar no próximo.
+
+**Como funciona** (`playbook.c`):
+- Spawn task `playbook` com cópia local do JSON
+- Walks steps sequencialmente:
+  - `cmd`: monta JSON `{cmd, seq:-1, args...}`, substitui `$vars`,
+    chama `command_router_handle_json` direto (despacha localmente)
+  - `wait_ms`: loop com vTaskDelay 50ms até timeout
+  - `wait_event`: seta `s_wait_event_msg_type`, loop poll `s_wait_event_seen`
+    até timeout (hook weak setado por playbook_hook_tlv strong override)
+  - `set`: armazena no array de vars
+- Após cada step: emite TLV `PLAYBOOK_STEP_DONE 0x28`
+- Aborta em 3 erros consecutivos
+- Final: TLV `PLAYBOOK_DONE 0x29` com totals
+
+**Hook TLV** (`transport_ble.c`):
+- `__attribute__((weak)) void playbook_hook_tlv(msg_type, payload, len)`
+- Chamado em todo `transport_ble_send_stream` antes do BLE notify
+- Strong override em `playbook.c` checa msg_type contra step.tlv
+
+**Persistência**: comando aceita `profile` em vez de `steps` — carrega
+JSON via `persist_profile_load`. Permite rodar workflows sem app
+conectado (boot → NVS → playbook autônomo). Combinado com `profile_save`
+da Phase 7.
+
+**Exemplo de playbook** (auto-Karma + EvilTwin + captive):
+```jsonc
+{
+  "cmd": "playbook_run",
+  "seq": 1,
+  "steps": [
+    {"type": "cmd", "cmd": "karma_then_twin",
+     "args": {"channel": 6, "duration_sec": 30}},
+    {"type": "wait_event", "tlv": 38, "timeout_ms": 60000},
+    // (tlv 38 = 0x26 EVIL_CLIENT_JOIN — espera 1 cliente associar)
+    {"type": "cmd", "cmd": "captive_portal_start"}
+  ]
+}
+```
+
+**Exemplo persistido**:
+```jsonc
+// 1. App salva o profile
+{"cmd": "profile_save", "name": "auto_karma",
+ "data": "[{\"type\":\"cmd\",...}]"}
+
+// 2. Roda direto da NVS
+{"cmd": "playbook_run", "profile": "auto_karma"}
+```
+
+**Limites**:
+- 32 steps por playbook
+- 8 variáveis simultâneas
+- 4096 bytes JSON
+- 3 erros consecutivos = abort
+- Vars são strings (max 64 chars cada) — sem JSON anidados na value
+
+**Limitações conhecidas**:
+- Sem `if`/`loop`/`select_top` ainda. Casos com decisão usam macros
+  hardcoded (ex: `karma_then_twin` faz a lógica em C).
+- Hook TLV roda no contexto do emitter (NimBLE host task ou worker
+  task). Setar flag é fast e seguro.
+- Wait_event captura SEMPRE o próximo TLV daquele type — sem filtro
+  por payload. Se 2 jobs paralelos emitem mesmo TLV, ambiguidade.
+- `cmd` step não pode esperar resposta do command (não há "ack
+  capture"). Se app precisa do resultado, encadeia com `wait_event`
+  no TLV de done correspondente (ex: `WIFI_SCAN_DONE 0x11` após
+  `wifi_scan`).
+
+**Combinação natural com playbook**:
+- `profile_save` → `playbook_run profile=` → workflow autônomo, restart-safe
+- Watchdog rodando em paralelo — playbook + watchdog cobrem detect+respond
+  + workflow scripted automático
 
 ---
 
