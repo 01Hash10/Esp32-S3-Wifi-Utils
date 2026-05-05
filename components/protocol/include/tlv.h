@@ -67,6 +67,11 @@ typedef enum {
     TLV_MSG_WATCHDOG_ACTION      = 0x37,
     TLV_MSG_WATCHDOG_DONE        = 0x38,
 
+    // Capture/data continued (0x39–0x3F): profile storage
+    TLV_MSG_PROFILE_DATA         = 0x39,
+    TLV_MSG_PROFILE_LIST_ITEM    = 0x3A,
+    TLV_MSG_PROFILE_LIST_DONE    = 0x3B,
+
     // Captura/dados (0x40–0x4F): streaming de pcap chunks.
     TLV_MSG_PCAP_FRAME         = 0x40,
     TLV_MSG_PCAP_DONE          = 0x41,

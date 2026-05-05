@@ -9,6 +9,9 @@
 #include "evil_twin.h"
 #include "captive_portal.h"
 #include "watchdog.h"
+#include "persist.h"
+#include "tlv.h"
+#include "nvs.h"  // pra ESP_ERR_NVS_NOT_FOUND
 
 #include <stdio.h>
 #include <string.h>
@@ -698,6 +701,164 @@ static void handle_watchdog_stop(cJSON *root)
     }
 }
 
+static void handle_profile_save(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *name_j = cJSON_GetObjectItemCaseSensitive(root, "name");
+    cJSON *data_j = cJSON_GetObjectItemCaseSensitive(root, "data");
+
+    if (!cJSON_IsString(name_j) || !name_j->valuestring[0]) {
+        send_err(seq, "bad_name", NULL);
+        return;
+    }
+    if (!cJSON_IsString(data_j) || !data_j->valuestring) {
+        send_err(seq, "bad_data", NULL);
+        return;
+    }
+    size_t dlen = strlen(data_j->valuestring);
+    if (dlen == 0 || dlen > PERSIST_PROFILE_MAX_BYTES) {
+        send_err(seq, "bad_data", "1..1024 chars");
+        return;
+    }
+
+    esp_err_t err = persist_profile_save(name_j->valuestring,
+                                          data_j->valuestring, dlen);
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "profile_save");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "saved");
+        cJSON_AddStringToObject(resp, "name", name_j->valuestring);
+        cJSON_AddNumberToObject(resp, "bytes", dlen);
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else if (err == ESP_ERR_INVALID_ARG) {
+        send_err(seq, "bad_args", NULL);
+    } else {
+        send_err(seq, "save_failed", esp_err_to_name(err));
+    }
+}
+
+static void emit_profile_data_tlv(const char *name, const char *data, size_t data_len)
+{
+    // payload: name_len(1) + name + data_len(2 BE) + data
+    size_t nlen = strlen(name);
+    if (nlen > PERSIST_PROFILE_NAME_MAX) nlen = PERSIST_PROFILE_NAME_MAX;
+    // cap data to TLV_MAX - 4 - (3 + nlen) = ~240 - nlen
+    size_t cap = TLV_MAX_FRAME_SIZE - 4 - 3 - nlen;
+    if (data_len > cap) data_len = cap;
+
+    uint8_t payload[TLV_MAX_FRAME_SIZE];
+    size_t off = 0;
+    payload[off++] = (uint8_t)nlen;
+    memcpy(&payload[off], name, nlen); off += nlen;
+    payload[off++] = (uint8_t)(data_len >> 8);
+    payload[off++] = (uint8_t)(data_len & 0xFF);
+    memcpy(&payload[off], data, data_len); off += data_len;
+
+    static uint8_t pseq = 0;
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_PROFILE_DATA, pseq++,
+                           payload, off);
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void handle_profile_load(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *name_j = cJSON_GetObjectItemCaseSensitive(root, "name");
+    if (!cJSON_IsString(name_j) || !name_j->valuestring[0]) {
+        send_err(seq, "bad_name", NULL);
+        return;
+    }
+
+    char buf[PERSIST_PROFILE_MAX_BYTES + 1];
+    size_t blen = 0;
+    esp_err_t err = persist_profile_load(name_j->valuestring, buf,
+                                          sizeof(buf), &blen);
+    if (err == ESP_OK) {
+        send_ack(seq, "profile_load");
+        emit_profile_data_tlv(name_j->valuestring, buf, blen);
+    } else if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NOT_FOUND) {
+        send_err(seq, "not_found", NULL);
+    } else if (err == ESP_ERR_INVALID_SIZE) {
+        send_err(seq, "too_big", NULL);
+    } else {
+        send_err(seq, "load_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_profile_delete(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *name_j = cJSON_GetObjectItemCaseSensitive(root, "name");
+    if (!cJSON_IsString(name_j) || !name_j->valuestring[0]) {
+        send_err(seq, "bad_name", NULL);
+        return;
+    }
+    esp_err_t err = persist_profile_delete(name_j->valuestring);
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "profile_delete");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "deleted");
+        cJSON_AddStringToObject(resp, "name", name_j->valuestring);
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NOT_FOUND) {
+        send_err(seq, "not_found", NULL);
+    } else {
+        send_err(seq, "delete_failed", esp_err_to_name(err));
+    }
+}
+
+static void emit_profile_list_item(const char *name)
+{
+    size_t nlen = strlen(name);
+    if (nlen > PERSIST_PROFILE_NAME_MAX) nlen = PERSIST_PROFILE_NAME_MAX;
+    uint8_t payload[1 + PERSIST_PROFILE_NAME_MAX];
+    payload[0] = (uint8_t)nlen;
+    memcpy(&payload[1], name, nlen);
+
+    static uint8_t pseq = 0;
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_PROFILE_LIST_ITEM, pseq++,
+                           payload, 1 + nlen);
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void emit_profile_list_done(uint16_t count)
+{
+    uint8_t payload[2];
+    payload[0] = (uint8_t)(count >> 8);
+    payload[1] = (uint8_t)(count & 0xFF);
+    static uint8_t pseq = 0;
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_PROFILE_LIST_DONE, pseq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void handle_profile_list(cJSON *root)
+{
+    int seq = seq_of(root);
+    char names[PERSIST_PROFILE_LIST_MAX][PERSIST_PROFILE_NAME_MAX + 1];
+    size_t count = 0;
+    esp_err_t err = persist_profile_list(names, PERSIST_PROFILE_LIST_MAX, &count);
+    if (err != ESP_OK) {
+        send_err(seq, "list_failed", esp_err_to_name(err));
+        return;
+    }
+    send_ack(seq, "profile_list");
+    for (size_t i = 0; i < count; i++) {
+        emit_profile_list_item(names[i]);
+    }
+    emit_profile_list_done((uint16_t)count);
+}
+
 static void handle_evil_twin_start(cJSON *root)
 {
     int seq = seq_of(root);
@@ -1238,6 +1399,14 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_watchdog_start(root);
     } else if (strcmp(c, "watchdog_stop") == 0) {
         handle_watchdog_stop(root);
+    } else if (strcmp(c, "profile_save") == 0) {
+        handle_profile_save(root);
+    } else if (strcmp(c, "profile_load") == 0) {
+        handle_profile_load(root);
+    } else if (strcmp(c, "profile_delete") == 0) {
+        handle_profile_delete(root);
+    } else if (strcmp(c, "profile_list") == 0) {
+        handle_profile_list(root);
     } else if (strcmp(c, "evil_twin_start") == 0) {
         handle_evil_twin_start(root);
     } else if (strcmp(c, "evil_twin_stop") == 0) {

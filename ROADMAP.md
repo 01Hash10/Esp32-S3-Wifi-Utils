@@ -186,11 +186,11 @@ ou removidos ao longo do projeto.
 
 ## Phase 7 — Persistence & UX (Firmware)
 
-- [ ] NVS storage de configs (canal, modos, whitelists)
-- [ ] Profiles persistentes (ex: "modo aula", "modo lab")
-- [ ] Pcap export streaming via BLE
-- [ ] OTA update via BLE (longo prazo)
-- [ ] Power management básico (sleep entre scans)
+- [x] NVS storage de configs — componente `persist` com namespace `wifiutils`, API genérica de blob storage
+- [x] Profiles persistentes — comandos `profile_save/load/list/delete` salvam JSON blob nomeado (≤14 chars name, ≤1024 bytes data) no NVS
+- [x] Pcap export streaming via BLE — já feito na Phase 2 (`pcap_start` emite TLV `PCAP_FRAME 0x40`)
+- [ ] OTA update via BLE — deferred (longo prazo, exige protocolo dedicado pra firmware update over BLE chunks + verificação SHA256)
+- [skipped] Power management básico — usuário usa cabo USB (powerbank/celular), sleep entre scans não é priority. Pular por enquanto.
 
 ## Phase 8 — App Flutter
 

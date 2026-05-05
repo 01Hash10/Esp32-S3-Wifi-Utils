@@ -50,6 +50,9 @@ firmware, explica:
 ### Phase 6 — Active counter-measures
 - [Watchdog (`watchdog_start`)](#watchdog_start--gating-de-contra-acoes-com-rate-limit-e-whitelist)
 
+### Phase 7 — Persistence
+- [Profile storage NVS (`profile_save/load/list/delete`)](#profile_storage--profile_save--load--list--delete-via-nvs)
+
 ### `pcap_start` — streaming de frames 802.11 via BLE
 
 **O que faz**: captura frames 802.11 num canal fixo e os envia em
@@ -761,6 +764,82 @@ ESP ──TLV[0x38] WATCHDOG_DONE (fired=N, blocked_wl=N, blocked_cd=N, blocked_
   (não MAC-specific).
 - Falso-positivo no detector → contra-ação errada. Use `cooldown` agressivo
   + `max_actions` baixo em ambientes desconhecidos.
+
+---
+
+## profile_storage — `profile_save / load / list / delete` via NVS
+
+**O que faz**: storage persistente de profiles JSON nomeados na partição
+NVS do ESP. Profiles sobrevivem reboots — útil pra:
+- Salvar configs de defesa específicas (ex: profile "modo casa" com
+  whitelist do AP doméstico, watchdog mask específico).
+- Pré-popular workflows (ex: profile "kit recon" com lista de SSIDs/canais
+  pra rotina de auditoria).
+- Futuro: playbook engine (Phase 3.5) recall profiles automaticamente.
+
+Firmware trata o conteúdo como **opaco** — não interpreta o JSON. App é
+responsável pelo schema do que vai dentro.
+
+**Como funciona** (NVS):
+- ESP-IDF NVS = partition `nvs` (4 KB típico) com namespace key-value.
+- Componente `persist` usa namespace `"wifiutils"`.
+- Keys = profile names (max 14 chars, ASCII printable sem espaço).
+- Values = blob (até 1024 bytes por profile).
+- ~50–100 profiles cabem antes da partition encher (depende do tamanho).
+
+**Comandos**:
+- **profile_save(name, data)**: `nvs_set_blob(name, data, len)` + commit.
+- **profile_load(name)**: `nvs_get_blob` + emite TLV `PROFILE_DATA 0x39`
+  no stream (conteúdo pode ser >240B → truncado em 1 frame; futuro
+  fragmenta).
+- **profile_delete(name)**: `nvs_erase_key`.
+- **profile_list**: itera entries do namespace via `nvs_entry_find` /
+  `nvs_entry_next`. Emite N×`PROFILE_LIST_ITEM 0x3A` + 1×`PROFILE_LIST_DONE 0x3B`.
+
+**Implementação** (`persist.c`):
+- `persist_init()`: tenta abrir o namespace pra confirmar (NVS é
+  inicializado pelo `transport_ble`).
+- `name_valid()`: 1..14 chars, ASCII printable.
+- Outras funções: wrappers triviais sobre nvs_*.
+
+**Fluxo**:
+```
+App ──{"cmd":"profile_save","name":"casa","data":"{\"defense_mask\":15,\"whitelist\":[\"AA:..\"]}"}──→ ESP
+ESP ──{"resp":"profile_save","status":"saved","name":"casa","bytes":47}──→ App
+
+  reboot do ESP — profile permanece no NVS
+
+App ──{"cmd":"profile_load","name":"casa"}──→ ESP
+ESP ──{"resp":"profile_load","status":"started"}──→ App  (ack)
+ESP ──TLV[0x39] PROFILE_DATA (name="casa", data="{\"defense_mask\":...}")──→ App
+
+App ──{"cmd":"profile_list"}──→ ESP
+ESP ──ack──→ App
+ESP ──TLV[0x3A] PROFILE_LIST_ITEM "casa"──→ App
+ESP ──TLV[0x3A] PROFILE_LIST_ITEM "lab"──→ App
+ESP ──TLV[0x3A] PROFILE_LIST_ITEM "aula"──→ App
+ESP ──TLV[0x3B] PROFILE_LIST_DONE (count=3)──→ App
+
+App ──{"cmd":"profile_delete","name":"casa"}──→ ESP
+ESP ──{"resp":"profile_delete","status":"deleted","name":"casa"}──→ App
+```
+
+**Limitações**:
+- 14 chars max no nome (limite key NVS = 15 com NUL).
+- 1024 bytes max por profile.
+- Sem fragmentação na entrega — profiles maiores que 240B são truncados
+  no `PROFILE_DATA` (frame único). Versão futura fragmenta.
+- NVS partition de 4 KB tem espaço pra ~50 profiles small. Aumentar
+  partition em `partitions.csv` se precisar de mais.
+- Conteúdo opaco pro firmware → erros de schema só são detectados pelo
+  app/playbook que consome.
+
+**Combinação natural**:
+- Pre-Phase 3.5: app envia profile pelo `profile_save`, depois recall
+  pelo `profile_load` antes de enviar comandos individuais.
+- Phase 3.5 (playbook): app salva playbook JSON via `profile_save`;
+  comando `playbook_run` futuro vai aceitar arg `profile=name` pra
+  carregar e executar diretamente do NVS sem app conectado.
 
 ---
 

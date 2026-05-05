@@ -139,6 +139,10 @@ Frame:
 | `ble_defense_stop` | `seq` | `{"resp":"ble_defense_stop","seq":N,"status":"started"}`. | 5 |
 | `watchdog_start` | `seq`, `actions` (bitmask: 1=anti_evil_twin, 2=ble_spam_jam; default 3=both), `whitelist` (array de BSSIDs MAC strings, max 16, default vazio), `cooldown_ms` (100–600000, default 10000), `max_actions` (1–100, default 5) | `{"resp":"watchdog_start","seq":N,"status":"started","actions":N,"whitelist_count":N}`. **Requer `defense_start` e/ou `ble_defense_start` rodando** pra detectores acionarem hooks. Watchdog dispara contra-ações quando alertas cruzam threshold + alvo não na whitelist + cooldown OK + cap não atingido. Cada contra-ação emite TLV `WATCHDOG_ACTION 0x37`; resumo final via `WATCHDOG_DONE 0x38`. | 6 |
 | `watchdog_stop` | `seq` | `{"resp":"watchdog_stop","seq":N,"status":"started"}`. Emite `WATCHDOG_DONE 0x38` final. | 6 |
+| `profile_save` | `seq`, `name` (string ≤14 chars, ASCII printable sem espaço), `data` (string, 1..1024 bytes — geralmente JSON) | `{"resp":"profile_save","seq":N,"status":"saved","name":"X","bytes":N}`. Salva blob NVS persistente. | 7 |
+| `profile_load` | `seq`, `name` | ack JSON imediato + TLV `PROFILE_DATA 0x39` no `stream` com o conteúdo. Erro `not_found` se não existe. | 7 |
+| `profile_delete` | `seq`, `name` | `{"resp":"profile_delete","seq":N,"status":"deleted","name":"X"}`. Erro `not_found` se não existe. | 7 |
+| `profile_list` | `seq` | ack JSON imediato + N×TLV `PROFILE_LIST_ITEM 0x3A` (1 por profile salvo) + TLV `PROFILE_LIST_DONE 0x3B` no final. | 7 |
 | `evil_twin_start` | `seq`, `ssid` (1–32 chars), `password` (opcional, 8–63 chars; vazio/ausente = open), `channel` (1–13), `max_conn` (opcional, 1–10, default 4) | `{"resp":"evil_twin_start","seq":N,"status":"started","ssid":"...","channel":N,"auth":"open"\|"wpa2"}`. **Requer ESP NÃO conectado**. Cada client que associa emite TLV `EVIL_CLIENT_JOIN`; cada disconnect emite `EVIL_CLIENT_LEAVE`. DHCP automático (default 192.168.4.x). | 3 |
 | `evil_twin_stop` | `seq` | `{"resp":"evil_twin_stop","seq":N,"status":"started"}`. Encerra o AP e volta pra STA-only. | 3 |
 | `captive_portal_start` | `seq`, `html` (opcional, página HTML servida; default = formulário login simples), `redirect_ip` (opcional, default `192.168.4.1`) | `{"resp":"captive_portal_start","seq":N,"status":"started","redirect_ip":"x.x.x.x"}`. **Requer `evil_twin` ativo**. Sobe DNS:53 (responde tudo com `redirect_ip`) + HTTP:80 (serve HTML). Cada query DNS emite TLV `PORTAL_DNS_QUERY`; cada HTTP request emite `PORTAL_HTTP_REQ` (até ~130B do body — pega POST de form com credenciais). | 3 |
@@ -244,6 +248,9 @@ Toda resposta de erro segue o schema:
 | `0x35` | `DEFENSE_BLE_SPAM` | device → app | alerta: rate alto de MACs broadcasting mesma assinatura vendor BLE | 5 |
 | `0x37` | `WATCHDOG_ACTION` | device → app | contra-ação disparada pelo watchdog (action_id + target_bssid + status) | 6 |
 | `0x38` | `WATCHDOG_DONE` | device → app | resumo final do watchdog (fired + blocked counters) | 6 |
+| `0x39` | `PROFILE_DATA` | device → app | conteúdo de profile (resposta do `profile_load`) | 7 |
+| `0x3A` | `PROFILE_LIST_ITEM` | device → app | 1 nome de profile (durante `profile_list`) | 7 |
+| `0x3B` | `PROFILE_LIST_DONE` | device → app | fim do `profile_list` (count) | 7 |
 | `0x40` | `PCAP_FRAME` | device → app | 1 frame 802.11 capturado pelo `pcap_start`, com timestamp relativo | 2 |
 | `0x41` | `PCAP_DONE` | device → app | resumo final do `pcap_start` (emitted/dropped/elapsed) | 2 |
 
@@ -617,6 +624,32 @@ Toda resposta de erro segue o schema:
 | 7 | 1 | `ssid_len` | uint8 |
 | 8 | `ssid_len` | `ssid` | UTF-8 |
 
+### `0x39 PROFILE_DATA` — payload (variável, 4..~240 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 1 | `name_len` | uint8, 1..14 |
+| 1 | `name_len` | `name` | UTF-8 |
+| 1+nL | 2 | `data_len` | uint16 BE |
+| 3+nL | `data_len` | `data` | conteúdo (geralmente JSON) |
+
+> Profiles maiores que ~240 bytes são truncados ao caber em 1 frame TLV
+> (BLE MTU 247 - tlv_hdr 4 - profile_hdr 3+nL). Pra futuro, fragmentação
+> em múltiplos frames.
+
+### `0x3A PROFILE_LIST_ITEM` — payload (variável, 2..15 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 1 | `name_len` | uint8, 1..14 |
+| 1 | `name_len` | `name` | UTF-8 |
+
+### `0x3B PROFILE_LIST_DONE` — payload (2 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `count` | uint16 BE, total de profiles listados |
+
 ### `0x37 WATCHDOG_ACTION` — payload (8 bytes)
 
 | Offset | Tamanho | Campo | Descrição |
@@ -787,3 +820,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 5 | Comandos `defense_start` / `defense_stop`: 4 detectores em paralelo (deauth storm / beacon flood / evil twin / karma) via promiscuous mgmt. Novos TLVs `DEFENSE_DEAUTH 0x30`, `DEFENSE_BEACON_FLOOD 0x31`, `DEFENSE_EVIL_TWIN 0x32`, `DEFENSE_KARMA 0x33`, `DEFENSE_DONE 0x34`. Cooldown de 3s entre alertas do mesmo tipo. Channel hop opcional. Cap 1h. Faixa 0x30–0x3F (defense events) inaugurada. |
 | 2026-05-05 | Phase 5 | Comandos `ble_defense_start` / `ble_defense_stop`: detector de `ble_spam_*` via rate de MACs únicos por assinatura vendor (Apple Continuity / Samsung EasySetup / Google Fast Pair). Novo TLV `DEFENSE_BLE_SPAM 0x35` (vendor + unique_macs + window_ms). Threshold 6/s, cooldown 3s. |
 | 2026-05-05 | Phase 6 | Comandos `watchdog_start` / `watchdog_stop`: counter-measures gating sobre os detectores. Actions: `anti_evil_twin` (deauth no BSSID twin) e `ble_spam_jam` (ble_adv_flood). Whitelist + cooldown_ms + max_actions. Novos TLVs `WATCHDOG_ACTION 0x37` e `WATCHDOG_DONE 0x38`. Hooks em `sniff_wifi.c` (evil_twin) e `scan_ble.c` (BLE spam) via weak symbols — watchdog opcional no build. Anti-deauth NÃO implementado (MAC spoofing torna direcionar contra-deauth no atacante real inviável). |
+| 2026-05-05 | Phase 7 | Comandos `profile_save` / `profile_load` / `profile_delete` / `profile_list`: storage NVS persistente de profiles JSON (até 1024 bytes cada, name ≤14 chars). Componente `persist` com namespace NVS "wifiutils". Novos TLVs `PROFILE_DATA 0x39`, `PROFILE_LIST_ITEM 0x3A`, `PROFILE_LIST_DONE 0x3B`. Profile content é opaco pro firmware — geralmente JSON definindo workflow pra app/playbook engine consumir. |
