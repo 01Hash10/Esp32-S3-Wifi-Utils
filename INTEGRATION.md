@@ -117,6 +117,8 @@ Frame:
 | `lan_scan` | `seq`, `timeout_ms` (opcional, default 3000, range 500–30000) | `{"resp":"lan_scan","seq":N,"status":"started"}` (ack imediato; hosts via TLV `LAN_HOST` em `stream`, fim via TLV `LAN_SCAN_DONE`). Requer `wifi_connect` antes. ARP scan no /24 do IP atual, ~5–8s típicos. | 3 |
 | `probe_sniff` | `seq`, `ch_min` (1–13, default 1), `ch_max` (1–13, default 13, ≥ ch_min), `dwell_ms` (100–5000, default 500), `duration_sec` (1–300, default 30) | `{"resp":"probe_sniff","seq":N,"status":"started"}` (ack imediato; cada probe único via TLV `PROBE_REQ` em `stream`, fim via `PROBE_DONE`). **Requer ESP NÃO conectado** (`wifi_disconnect` antes se preciso). Channel hopping no range, dedup por (mac, ssid) até 256 entradas. | 3 |
 | `probe_sniff_stop` | `seq` | `{"resp":"probe_sniff_stop","seq":N,"status":"started"}` (encerra cedo). | 3 |
+| `wpa_capture` | `seq`, `bssid` (string MAC), `channel` (1–13), `duration_sec` (opcional, default 60, max 600) | `{"resp":"wpa_capture","seq":N,"status":"started"}` (ack imediato; cada EAPOL via TLV `WPA_EAPOL` em `stream`, fim via `WPA_CAPTURE_DONE`). **Requer ESP NÃO conectado**. Encerra automaticamente se M1..M4 todos vistos. Para forçar handshake, app pode disparar `deauth` em paralelo. | 3 |
+| `wpa_capture_stop` | `seq` | `{"resp":"wpa_capture_stop","seq":N,"status":"started"}` (encerra cedo). | 3 |
 
 ### Erros padronizados
 
@@ -192,6 +194,8 @@ Toda resposta de erro segue o schema:
 | `0x15` | `LAN_SCAN_DONE` | device → app | resumo final do `lan_scan` | 3 |
 | `0x16` | `PROBE_REQ` | device → app | 1 probe único (mac, rssi, canal, ssid pedido) | 3 |
 | `0x17` | `PROBE_DONE` | device → app | resumo final do `probe_sniff` | 3 |
+| `0x18` | `WPA_EAPOL` | device → app | 1 frame 802.11+EAPOL capturado pelo `wpa_capture` | 3 |
+| `0x19` | `WPA_CAPTURE_DONE` | device → app | resumo final do `wpa_capture` | 3 |
 | `0x20` | `HACK_DEAUTH_DONE` | device → app | resultado final do `deauth` | 3 |
 | `0x21` | `HACK_BEACON_DONE` | device → app | resultado final do `beacon_flood` | 3 |
 | `0x22` | `HACK_BLE_SPAM_DONE` | device → app | resultado final do `ble_spam_apple` | 4 |
@@ -303,6 +307,33 @@ Toda resposta de erro segue o schema:
 | 2 | 2 | `frames_total` | uint16 BE, probe_req frames totais vistos (inclui dups) |
 | 4 | 4 | `scan_time_ms` | uint32 BE |
 | 8 | 1 | `status` | 0 = ok, 1 = limite de 256 dedup excedido, 2 = erro |
+
+### `0x18 WPA_EAPOL` — payload
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `bssid` | BSSID do AP (BE) |
+| 6 | 6 | `sta_mac` | MAC do cliente (a outra ponta) (BE) |
+| 12 | 1 | `msg_index` | 1..4 do 4-way handshake, 0 = não classificado |
+| 13 | 1 | `flags` | bit0 = truncated (frame > 227B), bit1+ reservado |
+| 14 | 2 | `frame_len` | uint16 BE, tamanho ORIGINAL do frame 802.11 (sem FCS, antes de truncar) |
+| 16 | até 227 | `frame` | bytes brutos do frame 802.11 (FC...EAPOL) — pcap-friendly |
+
+> O frame inclui header 802.11 + LLC/SNAP + EAPOL completo (sem o FCS de
+> 4 bytes do final). Pode ser concatenado direto num arquivo pcap com
+> link-type `LINKTYPE_IEEE802_11` (105). Se `flags` tem bit0 setado, o
+> frame foi truncado em 227 bytes — pcap usual aceita isso, mas hashcat
+> pode falhar dependendo de qual mensagem.
+
+### `0x19 WPA_CAPTURE_DONE` — payload (13 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `bssid` | BSSID alvo (eco do request) |
+| 6 | 1 | `frames_count` | total de frames EAPOL emitidos durante a captura |
+| 7 | 1 | `msg_mask` | bitmask: bit0=M1, bit1=M2, bit2=M3, bit3=M4. `0x0F` = 4-way completo |
+| 8 | 4 | `elapsed_ms` | uint32 BE, duração total |
+| 12 | 1 | `status` | 0 = ok (M1..M4 todos), 1 = parcial / timeout, 2 = erro |
 
 ### `0x20 HACK_DEAUTH_DONE` — payload (7 bytes)
 
@@ -447,3 +478,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3/4 | `deauth`/`beacon_flood`/`ble_spam_apple` viraram **assíncronos**: ack `started` em `cmd_ctrl`, resultado final em TLVs novos (`HACK_DEAUTH_DONE 0x20`, `HACK_BEACON_DONE 0x21`, `HACK_BLE_SPAM_DONE 0x22`). Evita supervision timeout do BLE com runs longos. Novo erro `hack_busy` quando há job concorrente. |
 | 2026-05-05 | Phase 3 | Comando `lan_scan`: ARP scan no /24 do IP atual (requer `wifi_connect`). Emite TLV `LAN_HOST 0x14` por host descoberto + `LAN_SCAN_DONE 0x15` ao final. |
 | 2026-05-05 | Phase 3 | Comandos `probe_sniff` / `probe_sniff_stop`: sniffer de probe requests via WiFi promiscuous mode com channel hopping. Requer ESP não-conectado. Emite TLV `PROBE_REQ 0x16` por (mac, ssid) único + `PROBE_DONE 0x17` ao final. Erros novos: `wifi_busy`, `sniff_busy`, `sniff_failed`, `sniff_idle`. |
+| 2026-05-05 | Phase 3 | Comandos `wpa_capture` / `wpa_capture_stop`: captura EAPOL 4-way handshake num BSSID/canal específico. Emite TLV `WPA_EAPOL 0x18` por frame (frame 802.11 bruto, pcap-friendly) + `WPA_CAPTURE_DONE 0x19` com mask M1..M4. Encerra cedo se 4-way completo. App pode emitir `deauth` paralelo pra forçar handshake. |

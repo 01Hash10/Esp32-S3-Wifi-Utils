@@ -33,6 +33,8 @@ typedef enum {
     TLV_MSG_LAN_SCAN_DONE   = 0x15,
     TLV_MSG_PROBE_REQ       = 0x16,
     TLV_MSG_PROBE_DONE      = 0x17,
+    TLV_MSG_WPA_EAPOL       = 0x18,
+    TLV_MSG_WPA_CAPTURE_DONE = 0x19,
 
     // Hacking events (0x20–0x2F): emitidos ao final de um job assíncrono
     // disparado por deauth / beacon_flood / ble_spam_apple.

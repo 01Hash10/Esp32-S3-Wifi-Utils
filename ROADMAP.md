@@ -83,7 +83,7 @@ ou removidos ao longo do projeto.
     + WIFI_IF_AP).
   - Comparar com scanner de baixo nível no Mac (`wdutil`, `Wireless Diagnostics`).
   - Ajustar IEs (HT/VHT capabilities) se filtros do scanner exigirem.
-- [ ] WPA handshake capture (EAPOL 4-way) → exporta pcap
+- [x] WPA handshake capture (EAPOL 4-way) → emite frames 802.11 brutos via TLV (`wpa_capture`); script de teste monta pcap
 
 ### LAN-level (atacante associado à rede)
 - [x] WiFi STA connect/disconnect (`wifi_connect`/`wifi_disconnect`)
