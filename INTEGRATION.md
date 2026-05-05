@@ -134,6 +134,8 @@ Frame:
 | `karma_stop` | `seq` | `{"resp":"karma_stop","seq":N,"status":"started"}`. | 3 |
 | `evil_twin_start` | `seq`, `ssid` (1–32 chars), `password` (opcional, 8–63 chars; vazio/ausente = open), `channel` (1–13), `max_conn` (opcional, 1–10, default 4) | `{"resp":"evil_twin_start","seq":N,"status":"started","ssid":"...","channel":N,"auth":"open"\|"wpa2"}`. **Requer ESP NÃO conectado**. Cada client que associa emite TLV `EVIL_CLIENT_JOIN`; cada disconnect emite `EVIL_CLIENT_LEAVE`. DHCP automático (default 192.168.4.x). | 3 |
 | `evil_twin_stop` | `seq` | `{"resp":"evil_twin_stop","seq":N,"status":"started"}`. Encerra o AP e volta pra STA-only. | 3 |
+| `captive_portal_start` | `seq`, `html` (opcional, página HTML servida; default = formulário login simples), `redirect_ip` (opcional, default `192.168.4.1`) | `{"resp":"captive_portal_start","seq":N,"status":"started","redirect_ip":"x.x.x.x"}`. **Requer `evil_twin` ativo**. Sobe DNS:53 (responde tudo com `redirect_ip`) + HTTP:80 (serve HTML). Cada query DNS emite TLV `PORTAL_DNS_QUERY`; cada HTTP request emite `PORTAL_HTTP_REQ` (até ~130B do body — pega POST de form com credenciais). | 3 |
+| `captive_portal_stop` | `seq` | `{"resp":"captive_portal_stop","seq":N,"status":"started"}`. | 3 |
 | `wps_pin_test` | `seq`, `bssid` (string MAC), `pin` (string 8 dígitos), `timeout_sec` (opcional, 15–120, default 60) | `{"resp":"wps_pin_test","seq":N,"status":"started"}` (ack imediato; resultado via TLV `WPS_TEST_DONE` em `stream`). **Requer ESP NÃO conectado**. Tenta 1 PIN — base pra brute-force lado-app ou validação de PIN externo (ex: pixiewps). | 3 |
 
 ### Erros padronizados
@@ -224,6 +226,8 @@ Toda resposta de erro segue o schema:
 | `0x26` | `EVIL_CLIENT_JOIN` | device → app | client associou ao Evil Twin AP (mac, aid) | 3 |
 | `0x27` | `EVIL_CLIENT_LEAVE` | device → app | client desassociou (mac, reason) | 3 |
 | `0x2C` | `WPS_TEST_DONE` | device → app | resultado do `wps_pin_test` (status + ssid + psk se sucesso) | 3 |
+| `0x2D` | `PORTAL_DNS_QUERY` | device → app | DNS query recebida pelo captive portal (src_ip + domínio) | 3 |
+| `0x2E` | `PORTAL_HTTP_REQ` | device → app | HTTP request (src_ip + method + path + body chunk) | 3 |
 | `0x40` | `PCAP_FRAME` | device → app | 1 frame 802.11 capturado pelo `pcap_start`, com timestamp relativo | 2 |
 | `0x41` | `PCAP_DONE` | device → app | resumo final do `pcap_start` (emitted/dropped/elapsed) | 2 |
 
@@ -476,6 +480,33 @@ Toda resposta de erro segue o schema:
 | 0 | 6 | `mac` | MAC do client que saiu (BE) |
 | 6 | 1 | `reason` | reason code 802.11 (1=unspecified, 7=class3 frame, etc) |
 
+### `0x2D PORTAL_DNS_QUERY` — payload (variável, 5..69 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 4 | `src_ip` | IPv4 do client que mandou a query (BE) |
+| 4 | 1 | `domain_len` | uint8, 0..64 |
+| 5 | `domain_len` | `domain` | UTF-8, ex: `apple.com` |
+
+> Truncado em 64 chars. Apps modernos fazem dezenas de DNS queries por
+> minuto (NTP, telemetry, captive detection); use pra montar fingerprint
+> do client.
+
+### `0x2E PORTAL_HTTP_REQ` — payload (variável, ~10..225 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 4 | `src_ip` | IPv4 do client (BE) |
+| 4 | 1 | `method_len` | uint8, ≤8 (`GET`, `POST`, etc) |
+| 5 | `method_len` | `method` | string ASCII |
+| 5+ml | 1 | `path_len` | uint8, ≤80 |
+| 6+ml | `path_len` | `path` | URL path, ex: `/login` |
+| 6+ml+pl | 2 | `body_len` | uint16 BE, tamanho do body chunk emitido |
+| 8+ml+pl | `body_len` | `body` | até 130 bytes do body (suficiente pra POST de login form) |
+
+> Pra capturar credenciais: `body` traz form-encoded como
+> `username=foo&password=bar`. App decodifica.
+
 ### `0x2C WPS_TEST_DONE` — payload (variável, 9..107 bytes)
 
 | Offset | Tamanho | Campo | Descrição |
@@ -646,3 +677,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3 | Comandos `karma_start` / `karma_stop`: Karma attack. ESP escuta probe req direcionados num canal e responde imediatamente com probe response forjado (BSSID = hash do SSID + locally-administered prefix). Novos TLVs `KARMA_HIT 0x24` (mac, ssid) único + `KARMA_DONE 0x25` (hits, unique clients, unique ssids, elapsed). |
 | 2026-05-05 | Phase 3 | Comandos `evil_twin_start` / `evil_twin_stop`: SoftAP fake (modo APSTA) com SSID/canal/password configurável + DHCP automático. Novos TLVs `EVIL_CLIENT_JOIN 0x26` (mac+aid) e `EVIL_CLIENT_LEAVE 0x27` (mac+reason) emitidos quando devices entram/saem do AP. Captive portal (DNS hijack + HTTP) é feature separada futura. |
 | 2026-05-05 | Phase 3 | Comando `wps_pin_test`: testa 1 PIN WPS contra um BSSID via supplicant do IDF (modo enrollee). Emite TLV `WPS_TEST_DONE 0x2C` com status + (em sucesso) SSID + PSK descobertos. Pixie Dust nativo marcado [blocked - lib limitation]: API IDF não expõe M2 cru; workaround = `pcap_start` + `pixiewps` offline. |
+| 2026-05-05 | Phase 3 | Comandos `captive_portal_start` / `captive_portal_stop`: complementa `evil_twin` com DNS hijack (UDP:53 redireciona tudo pro AP) + HTTP server (TCP:80 serve HTML configurável). Cada DNS query → TLV `PORTAL_DNS_QUERY 0x2D`; cada HTTP req → TLV `PORTAL_HTTP_REQ 0x2E` com body chunk de até 130B (captura POST forms com credenciais). |

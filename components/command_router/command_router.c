@@ -7,6 +7,7 @@
 #include "attack_lan.h"
 #include "sniff_wifi.h"
 #include "evil_twin.h"
+#include "captive_portal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -595,6 +596,52 @@ static void handle_evil_twin_stop(cJSON *root)
     }
 }
 
+static void handle_captive_portal_start(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (!evil_twin_busy()) {
+        send_err(seq, "twin_idle", "evil_twin must be running");
+        return;
+    }
+    cJSON *html_j = cJSON_GetObjectItemCaseSensitive(root, "html");
+    cJSON *ip_j   = cJSON_GetObjectItemCaseSensitive(root, "redirect_ip");
+
+    const char *html = cJSON_IsString(html_j) ? html_j->valuestring : NULL;
+    uint8_t ip[4] = {192, 168, 4, 1};
+    if (cJSON_IsString(ip_j) && parse_ipv4(ip_j->valuestring, ip) != 0) {
+        send_err(seq, "bad_redirect_ip", NULL);
+        return;
+    }
+
+    esp_err_t err = captive_portal_start(html, ip);
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "captive_portal_start");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "started");
+        char ipbuf[16];
+        snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u", ip[0],ip[1],ip[2],ip[3]);
+        cJSON_AddStringToObject(resp, "redirect_ip", ipbuf);
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "portal_busy", NULL);
+    } else {
+        send_err(seq, "portal_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_captive_portal_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = captive_portal_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "captive_portal_stop");
+    } else {
+        send_err(seq, "portal_idle", NULL);
+    }
+}
+
 static void handle_arp_throttle(cJSON *root)
 {
     int seq = seq_of(root);
@@ -1003,6 +1050,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_evil_twin_start(root);
     } else if (strcmp(c, "evil_twin_stop") == 0) {
         handle_evil_twin_stop(root);
+    } else if (strcmp(c, "captive_portal_start") == 0) {
+        handle_captive_portal_start(root);
+    } else if (strcmp(c, "captive_portal_stop") == 0) {
+        handle_captive_portal_stop(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }

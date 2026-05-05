@@ -16,6 +16,7 @@
 #include "attack_lan.h"
 #include "sniff_wifi.h"
 #include "evil_twin.h"
+#include "captive_portal.h"
 
 static const char *TAG = "boot-diag";
 
@@ -49,6 +50,7 @@ void app_main(void)
     ESP_ERROR_CHECK(attack_lan_init());
     ESP_ERROR_CHECK(sniff_wifi_init());
     ESP_ERROR_CHECK(evil_twin_init());
+    ESP_ERROR_CHECK(captive_portal_init());
 
     while (1) {
         log_mem();

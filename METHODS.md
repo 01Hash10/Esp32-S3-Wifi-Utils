@@ -40,6 +40,7 @@ firmware, explica:
 - [Karma attack (`karma_start`)](#karma_start--responde-probes-com-probe-response-forjado)
 - [Evil Twin AP (`evil_twin_start`)](#evil_twin_start--softap-fake-com-tracking-de-clients)
 - [WPS PIN test (`wps_pin_test`)](#wps_pin_test--testa-1-pin-wps-pixie-dust-blocked)
+- [Captive Portal (`captive_portal_start`)](#captive_portal_start--dns-hijack--http-server)
 
 ### `pcap_start` — streaming de frames 802.11 via BLE
 
@@ -362,6 +363,97 @@ ESP ──ack──→ App
 - `wifi_scan` antes pra descobrir BSSIDs com flag WPS=1 (já temos)
 - `pcap_start` em paralelo capturando o handshake completo pra
   análise + Pixie Dust offline depois
+
+---
+
+## `captive_portal_start` — DNS hijack + HTTP server
+
+**O que faz**: complementa o `evil_twin`. Sobe 2 servidores em userspace:
+- **UDP:53 (DNS)**: responde QUALQUER query com `redirect_ip` (default
+  192.168.4.1, IP do AP do ESP). Resultado: cliente acessa
+  `apple.com`/`google.com`/qualquer-coisa → resolve pro ESP.
+- **TCP:80 (HTTP)**: aceita conexões e serve uma página HTML
+  configurável (default = formulário simples "Sign in to FreeWifi").
+  Cada request emite TLV com método + path + body chunk → app captura
+  credenciais de POST forms.
+
+**Como funciona** (DNS):
+- DHCP server da IDF (já ativo via `evil_twin`) configura o cliente com
+  ESP como gateway + DNS server (192.168.4.1).
+- Cliente faz query → chega na nossa task UDP:53.
+- Parseia o nome da query (formato 802.11 com labels), emite TLV
+  `PORTAL_DNS_QUERY 0x2D` (src_ip + domain).
+- Constrói resposta DNS standard: copia header com QR=1, AA=1, RA=1,
+  ANCOUNT=1; mantém question; appende answer com:
+  - Compressed name pointer (`0xC0 0x0C` = "ver no offset 12 da question")
+  - TYPE=A (1) + CLASS=IN (1) + TTL=60s + RDLENGTH=4 + IP de redireção.
+- Sendto de volta. Cliente vê: `apple.com → 192.168.4.1`.
+
+**Como funciona** (HTTP):
+- Listen TCP:80. Accept loop com socket timeout de 1s pra evitar slowloris.
+- Lê request até `\r\n\r\n` ou buffer cheio (1KB).
+- Tenta ler mais 130 bytes de body (POST forms grandes).
+- Parse: `METHOD PATH HTTP/x.x` na primeira linha; body após `\r\n\r\n`.
+- Emite TLV `PORTAL_HTTP_REQ 0x2E` (src_ip + method + path + body).
+- Resposta: `200 OK` + Content-Type html + HTML configurável.
+
+**Captive Portal Detection** (auto-trigger nos 3 OS principais):
+- iOS: `GET http://captive.apple.com/hotspot-detect.html` → espera body
+  literal "Success". Como devolvemos HTML diferente, iOS abre a página
+  em popup automático.
+- Android: `GET http://connectivitycheck.gstatic.com/generate_204` →
+  espera 204 No Content. Devolvemos 200 com HTML, Android mostra "Sign in
+  to network".
+- Windows: `GET http://www.msftconnecttest.com/connecttest.txt` → espera
+  "Microsoft Connect Test". Idem, dispara popup.
+
+Não precisamos casos especiais — qualquer resposta != esperada serve.
+
+**Implementação** (`captive_portal.c`):
+- 2 FreeRTOS tasks: `dns_task` (4 KB stack) + `http_task` (6 KB stack).
+- Sockets lwIP via `lwip/sockets.h` (BSD-style).
+- HTML armazenado em buffer `malloc`'d (cap 32 KB), liberado em `_stop`.
+- `_stop` faz `shutdown(sock, SHUT_RDWR)` em ambos pra desbloquear
+  `recvfrom`/`accept`, depois aguarda tasks se auto-deletarem.
+
+**Fluxo**:
+```
+App ──{"cmd":"evil_twin_start","ssid":"FreeWifi","channel":6}──→ ESP
+ESP ──ack started──→ App
+App ──{"cmd":"captive_portal_start"}──→ ESP
+ESP ──ack started──→ App
+
+  ESP roda dns_task + http_task em paralelo.
+
+  cliente associa no AP, recebe IP via DHCP (192.168.4.X)
+  cliente: DNS query "apple.com"  ─UDP:53─→ ESP
+  ESP responde "192.168.4.1"; emite TLV[0x2D] DNS_QUERY (src, "apple.com")
+  
+  iOS dispara captive popup
+  cliente: GET http://captive.apple.com/hotspot-detect.html ─TCP:80─→ ESP
+  ESP serve HTML; emite TLV[0x2E] HTTP_REQ
+  
+  usuário preenche e dá submit
+  cliente: POST /login  body=username=lucas&password=hunter2 ─TCP:80─→ ESP
+  ESP serve HTML; emite TLV[0x2E] HTTP_REQ (com body=username=...&password=...)
+  App parseia → grava credenciais.
+```
+
+**Limitações**:
+- Sem HTTPS (port 443). Apps que tentam HTTPS pra `apple.com` etc
+  veem certificate mismatch e abortam — não capturamos credenciais
+  HTTPS. Pra HTTPS-MITM precisaria CA fake instalada no client (out of
+  scope).
+- HTML cap 32 KB.
+- Body chunk truncado em 130 bytes (BLE MTU 247 - overhead). Suficiente
+  pra forms de login típicos (~50–80 bytes).
+- 1 conexão HTTP por vez (sem pool). Tudo bem pra captive portal —
+  fluxo é sequencial.
+- Slowloris parcial mitigado por timeout 1s no recv. Nada robusto.
+
+**Combinação natural**:
+- `evil_twin_start(ssid)` + `captive_portal_start(html)` — twin + portal.
+- Em paralelo: `deauth(legit_bssid)` força clientes a migrarem.
 
 ---
 

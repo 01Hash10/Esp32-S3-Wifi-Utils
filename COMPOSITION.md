@@ -25,6 +25,7 @@ focando em:
 | `attack_lan` | `s_lan_busy` | lan_scan | Cache do lwIP é único; lan_scan + arp_cut/throttle rodando juntos = cache poluído |
 | `sniff_wifi` | `s_mode` | probe / eapol / pmkid / pcap / karma | 1 promiscuous CB + 1 filter por vez |
 | `evil_twin` | `s_active` | SoftAP fake | Hardware suporta 1 AP só |
+| `captive_portal` | `s_active` | DNS:53 + HTTP:80 servers | Singleton (1 par de tasks ouvindo nas portas) |
 
 ### Cross-component (mutex entre componentes diferentes)
 

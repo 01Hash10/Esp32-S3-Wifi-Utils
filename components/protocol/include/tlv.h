@@ -53,6 +53,8 @@ typedef enum {
     // 0x2A RECON_DONE — reservado pro macro recon_full (Phase 3.5)
     // 0x2B TRACKER_PERSISTENT — reservado pro macro tracker_hunt (Phase 3.5)
     TLV_MSG_WPS_TEST_DONE      = 0x2C,
+    TLV_MSG_PORTAL_DNS_QUERY   = 0x2D,
+    TLV_MSG_PORTAL_HTTP_REQ    = 0x2E,
 
     // Captura/dados (0x40–0x4F): streaming de pcap chunks.
     TLV_MSG_PCAP_FRAME         = 0x40,
