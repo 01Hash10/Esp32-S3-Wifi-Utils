@@ -97,7 +97,9 @@ ou removidos ao longo do projeto.
 - [ ] Dossiê de devices a partir de probe history (lado app — agregação multi-sessão)
 - [~] Evil twin (`evil_twin_start` — SoftAP fake + DHCP + tracking de clients via TLVs `EVIL_CLIENT_JOIN`/`LEAVE`). Captive portal (DNS hijack + HTTP) ainda a fazer em commit separado.
 - [x] Karma attack — `karma_start`: escuta probe req direcionado, responde com probe response forjado (BSSID = hash do SSID + prefix `0x02`). Útil pra mapear PNL; pra completar assoc precisa de Evil Twin.
-- [ ] WPS attack (Pixie Dust — viabilidade no S3 a confirmar)
+- [~] WPS attack:
+  - [x] `wps_pin_test`: testa 1 PIN via supplicant da IDF; emite TLV com SSID+PSK em sucesso. Base pra brute-force lado-app.
+  - [blocked] **Pixie Dust nativo**: API pública do IDF 5.4 não expõe M2 cru → impossível sem patch invasivo. Workaround documentado: `pcap_start` + processar offline com `pixiewps`.
 - [x] Channel jamming via RTS NAV-lock (`channel_jam`) — não é CW puro mas trava airtime efetivamente
 
 ## Phase 3.5 — Comandos compostos & Playbook

@@ -762,6 +762,50 @@ static void handle_channel_jam_stop(cJSON *root)
     }
 }
 
+static void handle_wps_pin_test(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (attack_lan_is_connected()) {
+        send_err(seq, "wifi_busy", "disconnect first");
+        return;
+    }
+
+    cJSON *bssid_j = cJSON_GetObjectItemCaseSensitive(root, "bssid");
+    cJSON *pin_j   = cJSON_GetObjectItemCaseSensitive(root, "pin");
+    cJSON *to_j    = cJSON_GetObjectItemCaseSensitive(root, "timeout_sec");
+
+    uint8_t bssid[6];
+    if (!cJSON_IsString(bssid_j) || parse_mac(bssid_j->valuestring, bssid) != 0) {
+        send_err(seq, "bad_bssid", NULL);
+        return;
+    }
+    if (!cJSON_IsString(pin_j) || strlen(pin_j->valuestring) != 8) {
+        send_err(seq, "bad_pin", "8 dígitos");
+        return;
+    }
+    // Validar que são todos dígitos
+    for (int i = 0; i < 8; i++) {
+        char ch = pin_j->valuestring[i];
+        if (ch < '0' || ch > '9') {
+            send_err(seq, "bad_pin", "só dígitos");
+            return;
+        }
+    }
+    int to = cJSON_IsNumber(to_j) ? to_j->valueint : 60;
+    if (to < 15)  to = 15;
+    if (to > 120) to = 120;
+
+    esp_err_t err = hacking_wifi_wps_pin_test(bssid, pin_j->valuestring,
+                                              (uint16_t)to);
+    if (err == ESP_OK) {
+        send_ack(seq, "wps_pin_test");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "hack_busy", NULL);
+    } else {
+        send_err(seq, "wps_failed", esp_err_to_name(err));
+    }
+}
+
 // Helper genérico pra todos os ble_spam_* (apple, samsung, google, multi).
 static void dispatch_ble_spam(cJSON *root, const char *cmd_name,
                                esp_err_t (*fn)(uint16_t))
@@ -911,6 +955,8 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_channel_jam(root);
     } else if (strcmp(c, "channel_jam_stop") == 0) {
         handle_channel_jam_stop(root);
+    } else if (strcmp(c, "wps_pin_test") == 0) {
+        handle_wps_pin_test(root);
     } else if (strcmp(c, "ble_spam_apple") == 0) {
         handle_ble_spam_apple(root);
     } else if (strcmp(c, "ble_spam_samsung") == 0) {

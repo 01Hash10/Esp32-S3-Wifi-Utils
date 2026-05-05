@@ -39,6 +39,7 @@ firmware, explica:
 - [Pcap streaming (`pcap_start`)](#pcap_start--streaming-de-frames-80211-via-ble)
 - [Karma attack (`karma_start`)](#karma_start--responde-probes-com-probe-response-forjado)
 - [Evil Twin AP (`evil_twin_start`)](#evil_twin_start--softap-fake-com-tracking-de-clients)
+- [WPS PIN test (`wps_pin_test`)](#wps_pin_test--testa-1-pin-wps-pixie-dust-blocked)
 
 ### `pcap_start` — streaming de frames 802.11 via BLE
 
@@ -271,6 +272,96 @@ ESP volta pra WIFI_MODE_STA, AP some
 - WPA3 não suportado no SoftAP (hoje só OPEN ou WPA2-PSK).
 - Modo APSTA tem trade-offs: rádio dividido entre AP beacon e qualquer
   scan ativo do STA — pode ter clients reportando RSSI inferior.
+
+---
+
+## `wps_pin_test` — testa 1 PIN WPS (Pixie Dust blocked)
+
+**O que faz**: tenta autenticar contra um AP via WPS PIN (modo enrollee).
+Se PIN é válido + AP responde, ESP recupera SSID + PSK. Single-shot —
+1 PIN por chamada. Base pra brute-force lado-app ou validação de PIN
+descoberto externamente (via pixiewps).
+
+**Sobre Pixie Dust** (importante!):
+
+Pixie Dust ataca o WPS PIN offline explorando RNG fraca de muitos APs:
+captura M1+M2 do handshake e calcula o PIN sem mais round-trips com o AP.
+Para fazer isso no ESP32 precisaríamos extrair os campos crus do M2
+(PKr = chave pública DH do registrar, N1 = nonce, E-Hash1, E-Hash2).
+
+**Limitação técnica do ESP-IDF 5.4**: a API pública (`esp_wps.h`) só
+expõe enable/start/disable e eventos high-level (success com PSK,
+failed com reason, timeout). Os campos crus do M2 ficam internos no
+`wpa_supplicant/src/wps/` — sem callback público pra extrair. Patchear
+o IDF é frágil (quebra updates).
+
+**Workaround pra Pixie Dust offline**:
+1. Sniffar a troca WPS entre o AP alvo e algum cliente legítimo:
+   `pcap_start --channel X --filter data --bssid AA:BB:CC:...`
+2. Salvar o pcap (já feito pelo nosso `pcap_test.py`).
+3. Extrair os frames EAP-WPS (M1, M2, etc) com Wireshark ou tshark.
+4. Rodar `pixiewps -e <PKE> -r <PKR> -s <E-Hash1> -z <E-Hash2> -a <auth_key> -n <N1>`
+   pra computar o PIN.
+5. Validar com `wps_pin_test --bssid ... --pin XXXXXXXX`.
+
+**Como funciona** (`wps_pin_test` em si):
+- IDF supplicant: `esp_wifi_wps_enable(WPS_TYPE_PIN, pin)` + `esp_wifi_wps_start(0)`.
+- Internamente faz: scan/find o AP do BSSID alvo, `EAPOL-Start`, troca
+  M1..M8 do WPS state machine, e em sucesso recebe credenciais.
+- Eventos relevantes:
+  - `WIFI_EVENT_STA_WPS_ER_SUCCESS`: payload tem `ap_cred[]` com SSID+passphrase.
+  - `WIFI_EVENT_STA_WPS_ER_FAILED`: reason = NORMAL / M2D (PIN inválido) / DEAUTH.
+  - `WIFI_EVENT_STA_WPS_ER_TIMEOUT`: AP não respondeu.
+  - `WIFI_EVENT_STA_WPS_ER_PBC_OVERLAP`: AP está em PBC com múltiplos requests.
+
+**Implementação** (`hacking_wifi.c`):
+- Async via task. Cria `EventGroupHandle_t` pra sinalizar quando
+  qualquer um dos 4 eventos chega.
+- Registra handler pra `WIFI_EVENT, ESP_EVENT_ANY_ID`, captura o ID +
+  payload do evento WPS, seta o bit do event group.
+- Task aguarda com `xEventGroupWaitBits` (timeout = `timeout_sec * 1000ms`).
+- Quando bit setado: lê `s_wps_event_id` + payloads, monta TLV
+  `WPS_TEST_DONE 0x2C` (status + ssid + psk se sucesso, fail_reason se falhou).
+- `esp_wifi_wps_disable()` no cleanup. Unregister handler.
+
+**Fluxo**:
+```
+App ──{"cmd":"wps_pin_test","bssid":"AA:BB:..","pin":"12345670"}──→ ESP
+ESP ──ack──→ App
+
+  ESP: esp_wifi_wps_enable(PIN="12345670") + wps_start
+  ESP ↔ AP: EAP-WPS handshake (M1..M8) sob o supplicant da IDF
+  
+  Caso 1 — PIN válido:
+    AP responde com credenciais (SSID + PSK)
+    WIFI_EVENT_STA_WPS_ER_SUCCESS dispara
+    ESP ──TLV[0x2C] WPS_TEST_DONE (status=0, ssid="...", psk="...")──→ App
+  
+  Caso 2 — PIN inválido:
+    AP responde M2D (Method-2 with Diagnostic = "PIN errado")
+    WIFI_EVENT_STA_WPS_ER_FAILED reason=M2D
+    ESP ──TLV[0x2C] WPS_TEST_DONE (status=1, fail_reason=1)──→ App
+  
+  Caso 3 — AP não responde:
+    WIFI_EVENT_STA_WPS_ER_TIMEOUT
+    ESP ──TLV[0x2C] WPS_TEST_DONE (status=2)──→ App
+
+  ESP: wps_disable, libera supplicant
+```
+
+**Limitações**:
+- 1 PIN por chamada — brute-force precisa loop lado-app (~3s por tentativa).
+- APs modernos lockam após N falhas (3..10) por X minutos. App deve
+  detectar M2D recorrente e backoff.
+- Pixie Dust offline: NÃO funciona com este firmware diretamente.
+  Workaround acima.
+- WPS PBC mode (botão físico) não testado — implementação atual usa
+  só PIN.
+
+**Combinação com outros métodos**:
+- `wifi_scan` antes pra descobrir BSSIDs com flag WPS=1 (já temos)
+- `pcap_start` em paralelo capturando o handshake completo pra
+  análise + Pixie Dust offline depois
 
 ---
 

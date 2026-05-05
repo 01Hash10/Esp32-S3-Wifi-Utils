@@ -53,3 +53,24 @@ esp_err_t hacking_wifi_channel_jam(uint8_t channel, uint16_t duration_sec);
 
 // Para um channel_jam em andamento (sinaliza stop pra task).
 esp_err_t hacking_wifi_channel_jam_stop(void);
+
+// Testa 1 PIN WPS contra um BSSID. Usa o supplicant WPS do IDF em modo
+// enrollee; se PIN é válido + AP suporta, recupera PSK e SSID.
+//
+// Limitações: API do IDF não expõe o M2 cru, então **Pixie Dust offline
+// não é viável** com este firmware (precisa sniffar troca WPS de outro
+// device com `pcap_start` e processar offline com `pixiewps`). Esta
+// primitiva é a base pra brute-force lado-app ou validação de PIN
+// descoberto externamente.
+//
+// Pré-requisito: ESP NÃO conectado como STA.
+//
+// Async: emite TLV_MSG_WPS_TEST_DONE ao final com status + (se sucesso)
+// SSID + PSK.
+//
+// @param bssid     BSSID alvo
+// @param pin       string de 8 dígitos (formato "12345670")
+// @param timeout_sec timeout total da tentativa (15..120, default 60)
+esp_err_t hacking_wifi_wps_pin_test(const uint8_t bssid[6],
+                                    const char *pin,
+                                    uint16_t timeout_sec);

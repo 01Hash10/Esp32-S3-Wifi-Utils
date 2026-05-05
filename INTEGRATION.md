@@ -134,6 +134,7 @@ Frame:
 | `karma_stop` | `seq` | `{"resp":"karma_stop","seq":N,"status":"started"}`. | 3 |
 | `evil_twin_start` | `seq`, `ssid` (1–32 chars), `password` (opcional, 8–63 chars; vazio/ausente = open), `channel` (1–13), `max_conn` (opcional, 1–10, default 4) | `{"resp":"evil_twin_start","seq":N,"status":"started","ssid":"...","channel":N,"auth":"open"\|"wpa2"}`. **Requer ESP NÃO conectado**. Cada client que associa emite TLV `EVIL_CLIENT_JOIN`; cada disconnect emite `EVIL_CLIENT_LEAVE`. DHCP automático (default 192.168.4.x). | 3 |
 | `evil_twin_stop` | `seq` | `{"resp":"evil_twin_stop","seq":N,"status":"started"}`. Encerra o AP e volta pra STA-only. | 3 |
+| `wps_pin_test` | `seq`, `bssid` (string MAC), `pin` (string 8 dígitos), `timeout_sec` (opcional, 15–120, default 60) | `{"resp":"wps_pin_test","seq":N,"status":"started"}` (ack imediato; resultado via TLV `WPS_TEST_DONE` em `stream`). **Requer ESP NÃO conectado**. Tenta 1 PIN — base pra brute-force lado-app ou validação de PIN externo (ex: pixiewps). | 3 |
 
 ### Erros padronizados
 
@@ -222,6 +223,7 @@ Toda resposta de erro segue o schema:
 | `0x25` | `KARMA_DONE` | device → app | resumo final do `karma_start` | 3 |
 | `0x26` | `EVIL_CLIENT_JOIN` | device → app | client associou ao Evil Twin AP (mac, aid) | 3 |
 | `0x27` | `EVIL_CLIENT_LEAVE` | device → app | client desassociou (mac, reason) | 3 |
+| `0x2C` | `WPS_TEST_DONE` | device → app | resultado do `wps_pin_test` (status + ssid + psk se sucesso) | 3 |
 | `0x40` | `PCAP_FRAME` | device → app | 1 frame 802.11 capturado pelo `pcap_start`, com timestamp relativo | 2 |
 | `0x41` | `PCAP_DONE` | device → app | resumo final do `pcap_start` (emitted/dropped/elapsed) | 2 |
 
@@ -474,6 +476,23 @@ Toda resposta de erro segue o schema:
 | 0 | 6 | `mac` | MAC do client que saiu (BE) |
 | 6 | 1 | `reason` | reason code 802.11 (1=unspecified, 7=class3 frame, etc) |
 
+### `0x2C WPS_TEST_DONE` — payload (variável, 9..107 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `bssid` | BSSID alvo (eco do request) |
+| 6 | 1 | `status` | 0=success, 1=failed, 2=timeout, 3=pbc_overlap, 4=internal_error |
+| 7 | 1 | `fail_reason` | só significativo se `status=1`: 0=normal, 1=M2D, 2=deauth |
+| 8 | 1 | `ssid_len` | uint8, 0..32 (não-zero apenas se sucesso) |
+| 9 | `ssid_len` | `ssid` | UTF-8 do SSID descoberto |
+| 9+sL | 1 | `psk_len` | uint8, 0..64 |
+| 10+sL | `psk_len` | `psk` | passphrase WPA descoberta (sucesso) |
+
+> Em sucesso, app pode usar `ssid` + `psk` direto pra `wifi_connect`.
+> Pixie Dust nativo NÃO está implementado nesta plataforma (ver
+> `METHODS.md` seção `wps_pin_test`); pra Pixie offline, usar
+> `pcap_start` filter=data com bssid + processar pcap com `pixiewps`.
+
 ### `0x40 PCAP_FRAME` — payload
 
 | Offset | Tamanho | Campo | Descrição |
@@ -626,3 +645,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 2 | Comandos `pcap_start` / `pcap_stop`: streaming de frames 802.11 sem storage local. Filtros mgmt/data/ctrl + opcional BSSID. Rate-limit interno ~5ms (~200 fps). Novos TLVs `PCAP_FRAME 0x40` (ts + orig_len + flags + frame até 236B) e `PCAP_DONE 0x41` (emitted/dropped/elapsed). Faixa 0x40–0x4F (captura/dados) inaugurada. |
 | 2026-05-05 | Phase 3 | Comandos `karma_start` / `karma_stop`: Karma attack. ESP escuta probe req direcionados num canal e responde imediatamente com probe response forjado (BSSID = hash do SSID + locally-administered prefix). Novos TLVs `KARMA_HIT 0x24` (mac, ssid) único + `KARMA_DONE 0x25` (hits, unique clients, unique ssids, elapsed). |
 | 2026-05-05 | Phase 3 | Comandos `evil_twin_start` / `evil_twin_stop`: SoftAP fake (modo APSTA) com SSID/canal/password configurável + DHCP automático. Novos TLVs `EVIL_CLIENT_JOIN 0x26` (mac+aid) e `EVIL_CLIENT_LEAVE 0x27` (mac+reason) emitidos quando devices entram/saem do AP. Captive portal (DNS hijack + HTTP) é feature separada futura. |
+| 2026-05-05 | Phase 3 | Comando `wps_pin_test`: testa 1 PIN WPS contra um BSSID via supplicant do IDF (modo enrollee). Emite TLV `WPS_TEST_DONE 0x2C` com status + (em sucesso) SSID + PSK descobertos. Pixie Dust nativo marcado [blocked - lib limitation]: API IDF não expõe M2 cru; workaround = `pcap_start` + `pixiewps` offline. |
