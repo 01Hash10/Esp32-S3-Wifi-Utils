@@ -90,30 +90,27 @@ Demais cross-component são por **canal de rádio** (não por busy flag):
 Comandos compostos que disparam 2+ jobs internamente, ack como qualquer
 comando, emitem TLVs componentes + DONE final.
 
-### `wpa_capture_kick`
+### `wpa_capture_kick` ✅ implementado em 2026-05-05
 
-**O que combina**: `deauth(broadcast, count=30)` + `wpa_capture(bssid, channel)`
+**O que combina**: `wpa_capture(bssid, channel)` + delay 150ms + `deauth(broadcast)`.
 
-**Sequência**:
-1. Inicia `wpa_capture` (modo EAPOL, channel fixo).
-2. Espera ~500ms pra o sniff estabilizar.
-3. Dispara `deauth` no BSSID alvo (broadcast = todos clients). Clients
-   reassociam → handshake.
-4. wpa_capture coleta os 4 frames até `0x0F` mask.
-5. Final: emite `WPA_CAPTURE_DONE` (do wpa_capture). Não há TLV específico
-   do macro — usa o existente.
+**Args**: `bssid`, `channel`, `duration_sec` (5–600, default 90),
+`deauth_count` (5–200, default 30).
 
-**Args**: `bssid`, `channel`, `duration_sec` (max do wpa_capture),
-`deauth_count` (default 30, range 5–200).
+Implementação no `command_router.c`. Sem TLV próprio — saída via TLVs
+do wpa_capture (`WPA_EAPOL 0x18` + `WPA_CAPTURE_DONE 0x19`).
 
-### `pmkid_capture_kick`
+### `pmkid_capture_kick` ✅ implementado em 2026-05-05
 
-**O que combina**: `deauth(broadcast, count=10)` + `pmkid_capture(bssid, channel)`
+**O que combina**: `pmkid_capture(bssid, channel)` + delay 150ms + `deauth(broadcast)`.
+
+**Args**: `bssid`, `channel`, `duration_sec` (5–600, default 60),
+`deauth_count` (1–100, default 10).
 
 PMKID precisa só do M1 (que vem após cliente iniciar associação). Deauth
 força reassoc → AP manda M1. Mais leve que wpa_capture_kick.
 
-### `evil_twin_kick`
+### `evil_twin_kick` ✅ implementado em 2026-05-05
 
 **O que combina**: `evil_twin_start(ssid, channel)` + (opcional) `deauth(legit_bssid, channel)`
 
@@ -122,7 +119,8 @@ legítimo. Clients perdidos no legítimo veem o twin com mesmo SSID e
 associam.
 
 **Args**: `ssid`, `channel`, `password?`, `legit_bssid?` (opcional — se
-ausente, só sobe twin sem deauth).
+ausente, só sobe twin sem deauth), `deauth_count` (5–200, default 30).
+Resposta inclui `kick_fired` (bool) indicando se o deauth foi disparado.
 
 ### `karma_then_twin`
 
@@ -137,15 +135,15 @@ ausente, só sobe twin sem deauth).
 Útil pra "automode": liga em ambiente desconhecido, ESP descobre o que
 todo mundo procura, e oferece ele mesmo como AP.
 
-### `recon_full`
+### `recon_full` ✅ implementado em 2026-05-05
 
 **O que combina**: `wifi_scan(passive, all)` + `ble_scan(active, 15s)` +
-(se conectado) `lan_scan(timeout=3s)`.
+(se `include_lan=true` e conectado) `lan_scan(timeout=3s)`.
 
 Snapshot completo do entorno em 1 comando. Cada subcomponente emite
 seus TLVs normais (`WIFI_SCAN_AP/DONE`, `BLE_SCAN_DEV/DONE`,
-`LAN_HOST/DONE`); macro só dispara em paralelo e emite TLV
-`RECON_DONE 0x2A` final agregando totais.
+`LAN_HOST/DONE`). Resposta JSON tem 3 booleans indicando quais scans
+iniciaram OK. Sem TLV próprio do macro — desejável agregar lado-app.
 
 ### `deauth_storm`
 

@@ -53,6 +53,9 @@ firmware, explica:
 ### Phase 7 — Persistence
 - [Profile storage NVS (`profile_save/load/list/delete`)](#profile_storage--profile_save--load--list--delete-via-nvs)
 
+### Phase 3.5 — Macros (comandos compostos)
+- [`wpa_capture_kick` / `pmkid_capture_kick` / `evil_twin_kick` / `recon_full`](#macros-phase-35--comandos-compostos)
+
 ### `pcap_start` — streaming de frames 802.11 via BLE
 
 **O que faz**: captura frames 802.11 num canal fixo e os envia em
@@ -840,6 +843,108 @@ ESP ──{"resp":"profile_delete","status":"deleted","name":"casa"}──→ Ap
 - Phase 3.5 (playbook): app salva playbook JSON via `profile_save`;
   comando `playbook_run` futuro vai aceitar arg `profile=name` pra
   carregar e executar diretamente do NVS sem app conectado.
+
+---
+
+## Macros Phase 3.5 — comandos compostos
+
+**O que faz**: 4 comandos novos que orquestram 2+ primitivas existentes
+internamente. App envia 1 só comando → firmware roda a sequência.
+Cada macro reusa os TLVs das primitivas (não há TLVs novos).
+
+**Padrão de implementação**: handler do comando faz `vTaskDelay(150ms)`
+entre os 2 starts pra promiscuous estabilizar antes do TX começar.
+A delay roda no contexto NimBLE — 150ms é tolerável (<< supervision
+timeout 6s+). Após delay, dispara o segundo job e retorna ack JSON.
+
+### `wpa_capture_kick`
+
+Combina `wpa_capture(bssid, channel, duration)` + `deauth(broadcast,
+bssid, channel, count)`. Pipeline:
+
+1. `sniff_wifi_eapol_start(bssid, channel, duration_sec)` — fixa promisc
+   no canal alvo
+2. `vTaskDelay(150ms)` — promiscuous ativa estável
+3. `hacking_wifi_deauth(broadcast, bssid, channel, deauth_count, reason=7)` —
+   força clients a reassociar
+4. Ack JSON com status
+
+Caso de uso: cracking WPA/WPA2 PSK convencional. Saída pcap via TLVs
+`WPA_EAPOL 0x18` + `WPA_CAPTURE_DONE 0x19` do wpa_capture.
+
+Status retornado:
+- `started` se ambos OK
+- `started_no_kick` se wpa_capture iniciou mas deauth falhou
+  (wpa_capture continua rodando — handshake ainda pode emergir
+  passivamente)
+
+### `pmkid_capture_kick`
+
+Análogo ao acima mas com `pmkid_capture` + `deauth`. Defaults menores
+(deauth_count=10, duration=60s) porque PMKID emerge no M1 (1º frame),
+não precisa do 4-way completo.
+
+### `evil_twin_kick`
+
+Combina `evil_twin_start(ssid, password, channel)` + opcional
+`deauth(broadcast, legit_bssid, channel, count)`. Pipeline:
+
+1. `evil_twin_start(...)` sobe SoftAP fake
+2. Se `legit_bssid` foi passado:
+   - `vTaskDelay(200ms)` — twin estabiliza beacon
+   - `hacking_wifi_deauth(broadcast, legit_bssid, channel, count, 7)` —
+     kicka clients do AP legítimo. Eles reassociam → muitos pegam o twin.
+
+Status retornado inclui `kick_fired` (bool).
+
+Após o macro retornar, app pode encadear com `captive_portal_start`
+pra capturar credenciais.
+
+### `recon_full`
+
+Snapshot completo do entorno em 1 comando. Dispara em paralelo:
+1. `scan_wifi_start(SCAN_WIFI_MODE_PASSIVE, 0)` — todos os canais 2.4GHz
+2. `scan_ble_start_ex(SCAN_BLE_MODE_ACTIVE, 15)` — 15s de active scan
+3. Se `include_lan=true` e ESP conectado: `attack_lan_lan_scan_start(3000)`
+
+Cada subprimitivo emite seus próprios TLVs (`WIFI_SCAN_AP/DONE`,
+`BLE_SCAN_DEV/DONE`, `LAN_HOST/DONE`). App processa todos paralelos.
+
+Status retornado: 3 booleans indicando quais scans iniciaram OK.
+
+**Exemplo de fluxo combinado** (ataque WPA full):
+```
+App ──{"cmd":"wpa_capture_kick","bssid":"AA:..","channel":6,"duration_sec":120,"deauth_count":50}──→ ESP
+ESP ──ack started──→ App
+   (wpa_capture rodando + 50 deauths disparados em background)
+   ESP ──TLV[0x18] WPA_EAPOL M1──→ App
+   ESP ──TLV[0x18] WPA_EAPOL M2──→ App
+   ESP ──TLV[0x18] WPA_EAPOL M3──→ App
+   ESP ──TLV[0x18] WPA_EAPOL M4──→ App
+   ESP ──TLV[0x19] WPA_CAPTURE_DONE──→ App
+App grava pcap → hashcat
+```
+
+**Limitações**:
+- 150ms vTaskDelay no NimBLE host task — bloqueia BLE por 150ms.
+  Tolerável mas não ideal. Solução futura: spawn task auxiliar
+  (mais código).
+- Macros não fazem cleanup automático em caso de falha parcial. Se
+  evil_twin_kick fica com `kick_fired=false`, twin segue rodando —
+  app deve chamar `evil_twin_stop` se quiser.
+- Não há TLV próprio do macro — app correlaciona pelos TLVs das
+  primitivas (mais flexível, menos prescritivo).
+
+### Pendentes
+- `karma_then_twin` (decisão automática top-SSID): exige callback API
+  pra macro escutar `KARMA_HIT`s internamente. Refator não-trivial,
+  fica pra próximo commit.
+- `deauth_storm` (deauth + channel_jam): trivial, mas comprometería
+  s_busy de hacking_wifi (deauth e channel_jam compartilham).
+  Implementação requer relax desse mutex.
+- `mitm_capture`: bloqueado pela falta de forwarding real no arp_throttle.
+- `tracker_hunt`: aggregação multi-scan, fica como evolução do
+  ble_defense.
 
 ---
 

@@ -115,30 +115,14 @@ ou removidos ao longo do projeto.
 
 ### Macros (firmware-side, comandos compostos hardcoded)
 
-- [ ] `wpa_capture_kick` — `deauth(broadcast, count=30)` + `wpa_capture`
-  no mesmo BSSID/canal. Caso de uso: cracking WPA convencional.
-- [ ] `pmkid_capture_kick` — análogo: `deauth` + `pmkid_capture`.
-  Caso de uso: PMKID-only attack se AP não suportar Offline Finding KDE
-  na primeira tentativa.
-- [ ] `evil_twin_kick` — `evil_twin_start(ssid)` + `deauth(legit_bssid)`
-  paralelo. Caso de uso: forçar clients a migrar do AP legítimo pro twin.
-- [ ] `karma_then_twin` — `karma_start` por N segundos, escolhe o SSID
-  mais probed, **automaticamente** sobe `evil_twin` com aquele SSID.
-  Mini-playbook embutido.
-- [ ] `recon_full` — `wifi_scan(passive, all)` + `ble_scan(active)`
-  paralelos + (se `wifi_connect` ativo) `lan_scan`. Snapshot completo
-  do entorno em 1 comando.
-- [ ] `deauth_storm` — `deauth(bssid, count=200)` + `channel_jam` no
-  mesmo canal. DoS combinado: kicka clients e impede reconexão.
-- [ ] `mitm_capture` — `arp_cut(target)` modo throttle + `pcap_start`
-  no canal do AP filtrando por target_mac. Captura tráfego HTTP do
-  alvo enquanto o cut estrangula a banda. (Depende de forwarding mode
-  futuro do arp_cut pra realmente passar dados.)
-- [ ] `tracker_hunt` — `ble_scan(active)` por N segundos, agrega devices
-  com flag `tracker` no `BLE_SCAN_DEV` payload, emite alerta TLV se
-  algum device persistir entre múltiplos scans (= seguindo você).
-  Lado-app pode fazer; mas embutir no firmware permite operação 24/7
-  sem app conectado.
+- [x] `wpa_capture_kick` — `wpa_capture` + delay 150ms + `deauth(broadcast)` na mesma sessão
+- [x] `pmkid_capture_kick` — análogo: `pmkid_capture` + `deauth`
+- [x] `evil_twin_kick` — `evil_twin_start` + opcional `deauth(legit_bssid)`
+- [ ] `karma_then_twin` — exige callback API pra macro escutar `KARMA_HIT`s internamente; refator não-trivial pendente
+- [x] `recon_full` — `wifi_scan(passive,all)` + `ble_scan(active,15s)` + (opt) `lan_scan` paralelos
+- [ ] `deauth_storm` — `deauth` + `channel_jam` requer relax do `s_busy` em hacking_wifi (atualmente exclusive entre eles)
+- [ ] `mitm_capture` — bloqueado pela falta de forwarding real no `arp_throttle`
+- [ ] `tracker_hunt` — aggregação multi-scan, fica como evolução do `ble_defense`
 
 ### Playbook engine (médio prazo)
 
