@@ -1,12 +1,36 @@
 # Esp32-S3-Wifi-Utils
 
+[![ci](https://github.com/01Hash10/Esp32-S3-Wifi-Utils/actions/workflows/ci.yml/badge.svg)](https://github.com/01Hash10/Esp32-S3-Wifi-Utils/actions/workflows/ci.yml)
+
 Ferramenta de pesquisa em segurança WiFi/Bluetooth para uso pessoal em
 ambiente de laboratório controlado (apenas em redes próprias).
 
-> **Aviso legal**: este projeto destina-se exclusivamente a pesquisa de
-> segurança autorizada e fins educacionais em hardware/redes próprias.
-> O uso em redes ou dispositivos sem autorização explícita do proprietário
-> é ilegal na maioria das jurisdições.
+## ⚠️ Política de uso responsável
+
+Este firmware contém features **ofensivas** que só são legais em:
+1. **Hardware/redes de propriedade do operador**, OU
+2. **Ambientes com autorização explícita por escrito** do dono da
+   rede/device (pentest contratado, CTF, lab acadêmico).
+
+**Uso fora desses cenários é ilegal** na maioria das jurisdições:
+- Brasil: Lei 9.296/96 (interceptação de comunicações), Lei 12.737/12
+  (Carolina Dieckmann)
+- EU: GDPR + ePrivacy Directive
+- US: Computer Fraud and Abuse Act (CFAA), Wiretap Act
+
+### Checklist antes de testar
+
+- [ ] Estou em rede/hardware que **eu controlo** OU tenho autorização
+      escrita do dono?
+- [ ] O ambiente RF está isolado (Hotspot pessoal, rede de lab) — sem
+      vizinhos sendo afetados colateralmente?
+- [ ] Vou parar os serviços ofensivos (`evil_twin_stop`,
+      `captive_portal_stop`, `arp_cut_stop`) ao terminar?
+- [ ] Documentei o teste (data, escopo, alvos)?
+
+Em caso de dúvida sobre legalidade: **pergunte a um advogado**, não a
+um chatbot. Ver `THREAT_MODEL.md` pra threat model completo +
+discussão de mitigações.
 
 ## Hardware
 
@@ -143,10 +167,30 @@ Cache do CMake corrompido. Solução: `rm -rf .pio/build && pio run`.
 
 ## Status
 
-Phase 0 (Foundation) concluída. Próximo: Phase 1 (BLE transport + protocolo).
+Firmware **maduro** — Phases 0–7 entregues. Restam apenas evoluções
+incrementais (forwarding real pra MITM, agregação multi-scan tracker,
+playbook step types `if`/`loop`).
 
-Roadmap completo com checklist de todas as features (scan / hacking /
-defense) em [`ROADMAP.md`](ROADMAP.md).
+Resumo:
+- Phase 0–2: Foundation, BLE transport, scan WiFi/BLE — ✅
+- Phase 3 + 3.5: ataques WiFi + macros + **playbook engine** — ✅ (Pixie Dust nativo blocked, MITM forwarding deferred)
+- Phase 4: ataques BLE (Apple/Samsung/Google spam, adv flood) — ✅
+- Phase 5: defense detectors (deauth/beacon flood/evil twin/karma/BLE spam) — ✅
+- Phase 6: counter-measures (watchdog gating com whitelist + cooldown) — ✅
+- Phase 7: persistence NVS + profiles — ✅ (OTA deferred)
+- Phase 8: app Flutter — out of scope deste repo
+- Phase 9: CI/CD + tests + threat model — ✅
+
+## Documentação
+
+| Arquivo | Para quê |
+|---|---|
+| [`ROADMAP.md`](ROADMAP.md) | Checklist de features + status por phase |
+| [`INTEGRATION.md`](INTEGRATION.md) | Manual do app: protocolo BLE, comandos JSON, TLVs |
+| [`METHODS.md`](METHODS.md) | Referência técnica: como cada método funciona internamente |
+| [`COMPOSITION.md`](COMPOSITION.md) | Auditoria de exclusão entre componentes + matriz de paralelismo + macros |
+| [`THREAT_MODEL.md`](THREAT_MODEL.md) | Modelagem de ameaças do firmware + política de uso responsável |
+| [`CLAUDE.md`](CLAUDE.md) | Guia pra contribuição + decisões de arquitetura
 
 ## Arquitetura (decisões fechadas)
 

@@ -1,0 +1,88 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            .pio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini', 'sdkconfig.defaults', 'partitions.csv') }}
+          restore-keys: |
+            pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware
+        run: pio run
+
+      - name: Check size budget
+        run: |
+          # Falha se RAM > 50KB ou Flash > 1.5MB (limites generosos)
+          ELF=.pio/build/esp32-s3-devkitc-1/firmware.elf
+          test -f "$ELF" || { echo "ELF não encontrado"; exit 1; }
+
+          # Pega da última linha do "RAM:" e "Flash:" no output do pio
+          pio run 2>&1 | tee /tmp/buildlog.txt
+          RAM=$(grep "RAM:" /tmp/buildlog.txt | tail -1 | awk '{print $5}')
+          FLASH=$(grep "Flash:" /tmp/buildlog.txt | tail -1 | awk '{print $5}')
+          echo "Build size: RAM=$RAM bytes, Flash=$FLASH bytes"
+          if [ "${RAM:-0}" -gt 51200 ]; then
+            echo "::error::RAM excedeu 50KB ($RAM)"; exit 1
+          fi
+          if [ "${FLASH:-0}" -gt 1572864 ]; then
+            echo "::error::Flash excedeu 1.5MB ($FLASH)"; exit 1
+          fi
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            .pio/build/esp32-s3-devkitc-1/firmware.bin
+            .pio/build/esp32-s3-devkitc-1/bootloader.bin
+            .pio/build/esp32-s3-devkitc-1/partitions.bin
+          if-no-files-found: error
+          retention-days: 14
+
+  lint-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verifica que docs obrigatórios existem
+        run: |
+          for f in CLAUDE.md ROADMAP.md INTEGRATION.md METHODS.md COMPOSITION.md README.md; do
+            test -f "$f" || { echo "::error::Faltando $f"; exit 1; }
+          done
+          echo "Todos os docs obrigatórios presentes."
+
+      - name: Verifica que não há TODO/FIXME nos docs principais
+        run: |
+          # Permitido apenas em ROADMAP (é uma checklist)
+          for f in CLAUDE.md INTEGRATION.md METHODS.md COMPOSITION.md; do
+            if grep -nE "(TODO|FIXME|XXX)" "$f" 2>/dev/null; then
+              echo "::warning::$f contém TODO/FIXME"
+            fi
+          done

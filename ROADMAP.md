@@ -189,12 +189,12 @@ ou removidos ao longo do projeto.
 
 ## Phase 9 — Quality & Hardening
 
-- [ ] Logging estruturado e filtrável (níveis por componente)
-- [ ] Tests unitários do command router e TLV codec
-- [ ] CI/CD: build do firmware no GitHub Actions
-- [ ] Documentação por componente (header docs)
-- [ ] Threat model documentado
-- [ ] Policy de uso responsável (uso lab-only) no README
+- [ ] Logging estruturado e filtrável (níveis por componente) — futuro: comando `log_set` em runtime via `esp_log_level_set`
+- [~] Tests unitários do TLV codec — `test/test_tlv/` com 9 cases Unity (encode válido/sem payload/máximo/buffer pequeno/payload acima do max + decode round-trip/frame pequeno/inconsistência length). **Falta** coverage do command_router (mais complexo — depende de N componentes)
+- [x] CI/CD: build do firmware no GitHub Actions (`.github/workflows/ci.yml` — build + size budget check + lint dos docs)
+- [ ] Documentação por componente (header docs Doxygen-style) — futuro incremental
+- [x] Threat model documentado — `THREAT_MODEL.md` com 5 surfaces (BLE/WiFi/BLE adversarial/Persistence/OTA), gaps priorizados, roadmap de hardening
+- [x] Policy de uso responsável (uso lab-only) no README — checklist legal + jurisdições + link pro THREAT_MODEL
 
 ---
 
