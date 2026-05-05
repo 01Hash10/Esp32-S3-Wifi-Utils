@@ -135,6 +135,8 @@ Frame:
 | `karma_stop` | `seq` | `{"resp":"karma_stop","seq":N,"status":"started"}`. | 3 |
 | `defense_start` | `seq`, `mask` (bitmask 1=deauth, 2=beacon_flood, 4=evil_twin, 8=karma; default 15=all), `channel` (0=hop, 1–13=fixo), `ch_min`/`ch_max` (1–13, só se hop), `dwell_ms` (100–5000, só se hop), `duration_sec` (0=até stop, max 3600) | `{"resp":"defense_start","seq":N,"status":"started"}` (ack imediato; alerts via TLVs `0x30..0x33`, fim via `0x34`). **Requer ESP NÃO conectado**. Detectores rodam em paralelo no mesmo loop promiscuous. | 5 |
 | `defense_stop` | `seq` | `{"resp":"defense_stop","seq":N,"status":"started"}`. | 5 |
+| `ble_defense_start` | `seq`, `duration_sec` (opcional, 0=até stop, max 3600, default 60) | `{"resp":"ble_defense_start","seq":N,"status":"started"}`. Detecta `ble_spam_*` por rate de MACs únicos por assinatura vendor. Não emite `BLE_SCAN_DEV` neste modo — só TLV `DEFENSE_BLE_SPAM 0x35` quando threshold cruza. | 5 |
+| `ble_defense_stop` | `seq` | `{"resp":"ble_defense_stop","seq":N,"status":"started"}`. | 5 |
 | `evil_twin_start` | `seq`, `ssid` (1–32 chars), `password` (opcional, 8–63 chars; vazio/ausente = open), `channel` (1–13), `max_conn` (opcional, 1–10, default 4) | `{"resp":"evil_twin_start","seq":N,"status":"started","ssid":"...","channel":N,"auth":"open"\|"wpa2"}`. **Requer ESP NÃO conectado**. Cada client que associa emite TLV `EVIL_CLIENT_JOIN`; cada disconnect emite `EVIL_CLIENT_LEAVE`. DHCP automático (default 192.168.4.x). | 3 |
 | `evil_twin_stop` | `seq` | `{"resp":"evil_twin_stop","seq":N,"status":"started"}`. Encerra o AP e volta pra STA-only. | 3 |
 | `captive_portal_start` | `seq`, `html` (opcional, página HTML servida; default = formulário login simples), `redirect_ip` (opcional, default `192.168.4.1`) | `{"resp":"captive_portal_start","seq":N,"status":"started","redirect_ip":"x.x.x.x"}`. **Requer `evil_twin` ativo**. Sobe DNS:53 (responde tudo com `redirect_ip`) + HTTP:80 (serve HTML). Cada query DNS emite TLV `PORTAL_DNS_QUERY`; cada HTTP request emite `PORTAL_HTTP_REQ` (até ~130B do body — pega POST de form com credenciais). | 3 |
@@ -237,6 +239,7 @@ Toda resposta de erro segue o schema:
 | `0x32` | `DEFENSE_EVIL_TWIN` | device → app | alerta: mesmo SSID com 2 BSSIDs distintos | 5 |
 | `0x33` | `DEFENSE_KARMA` | device → app | alerta: BSSID com prefix locally-administered (suspeita Karma) | 5 |
 | `0x34` | `DEFENSE_DONE` | device → app | resumo final do `defense_start` | 5 |
+| `0x35` | `DEFENSE_BLE_SPAM` | device → app | alerta: rate alto de MACs broadcasting mesma assinatura vendor BLE | 5 |
 | `0x40` | `PCAP_FRAME` | device → app | 1 frame 802.11 capturado pelo `pcap_start`, com timestamp relativo | 2 |
 | `0x41` | `PCAP_DONE` | device → app | resumo final do `pcap_start` (emitted/dropped/elapsed) | 2 |
 
@@ -610,6 +613,19 @@ Toda resposta de erro segue o schema:
 | 7 | 1 | `ssid_len` | uint8 |
 | 8 | `ssid_len` | `ssid` | UTF-8 |
 
+### `0x35 DEFENSE_BLE_SPAM` — payload (4 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 1 | `vendor` | 0=Apple, 1=Samsung, 2=Google |
+| 1 | 1 | `unique_macs` | uint8, MACs únicos vistos no window broadcasting essa assinatura |
+| 2 | 2 | `window_ms` | uint16 BE (default 1000) |
+
+> Threshold default: 6 MACs únicos/s. Cooldown 3s por vendor.
+> Real Apple/Samsung/Google devices broadcasting Continuity/EasySetup/
+> Fast Pair têm MAC estável; spam rotaciona MAC por payload → rate alto
+> = signature de spam.
+
 ### `0x34 DEFENSE_DONE` — payload (15 bytes)
 
 | Offset | Tamanho | Campo | Descrição |
@@ -747,3 +763,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3 | Comandos `captive_portal_start` / `captive_portal_stop`: complementa `evil_twin` com DNS hijack (UDP:53 redireciona tudo pro AP) + HTTP server (TCP:80 serve HTML configurável). Cada DNS query → TLV `PORTAL_DNS_QUERY 0x2D`; cada HTTP req → TLV `PORTAL_HTTP_REQ 0x2E` com body chunk de até 130B (captura POST forms com credenciais). |
 | 2026-05-05 | Phase 4 | Comando `ble_adv_flood`: DoS via channel congestion. Loop tight de adv com payload random + interval mínimo (20ms × 3 canais ≈ 75 PDUs/s). Novo TLV `BLE_FLOOD_DONE 0x2F`. Cap duration 60s pra não fritar. Active scan abuse: já coberto pelo `ble_scan mode=active` (Phase 2). |
 | 2026-05-05 | Phase 5 | Comandos `defense_start` / `defense_stop`: 4 detectores em paralelo (deauth storm / beacon flood / evil twin / karma) via promiscuous mgmt. Novos TLVs `DEFENSE_DEAUTH 0x30`, `DEFENSE_BEACON_FLOOD 0x31`, `DEFENSE_EVIL_TWIN 0x32`, `DEFENSE_KARMA 0x33`, `DEFENSE_DONE 0x34`. Cooldown de 3s entre alertas do mesmo tipo. Channel hop opcional. Cap 1h. Faixa 0x30–0x3F (defense events) inaugurada. |
+| 2026-05-05 | Phase 5 | Comandos `ble_defense_start` / `ble_defense_stop`: detector de `ble_spam_*` via rate de MACs únicos por assinatura vendor (Apple Continuity / Samsung EasySetup / Google Fast Pair). Novo TLV `DEFENSE_BLE_SPAM 0x35` (vendor + unique_macs + window_ms). Threshold 6/s, cooldown 3s. |

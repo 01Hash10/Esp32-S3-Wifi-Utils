@@ -44,6 +44,8 @@ firmware, explica:
 
 ### Phase 5 — Defense (Detection-only)
 - [Defense WiFi monitor (`defense_start`)](#defense_start--detectores-deauth--beacon-flood--evil-twin--karma)
+- [BLE spam detector (`ble_defense_start`)](#ble_defense_start--detector-de-ble_spam_-por-rate-de-macs-uacutenicos)
+- [PMKID exposure self-audit (workflow)](#pmkid-exposure-self-audit-workflow-com-pmkid_capture)
 
 ### `pcap_start` — streaming de frames 802.11 via BLE
 
@@ -543,6 +545,125 @@ ESP ──ack started──→ App
 - Em paralelo com `pcap_start` em outro canal? **Não** — sniff_wifi
   é singleton. Pra captura + detecção, escolher um. Ou rodar em
   pares de invocações.
+
+---
+
+## `ble_defense_start` — detector de `ble_spam_*` por rate de MACs únicos
+
+**O que faz**: detecta ataques de BLE spam (popups Apple/Samsung/Google
+proximity pairing) baseando-se em **rate de MACs únicos broadcasting a
+mesma assinatura vendor** numa janela de 1 segundo.
+
+**Como funciona**:
+- Real iPhone / Galaxy Buds / Pixel Buds usa MAC estável (random
+  resolvable, mas com baixa rotação).
+- `ble_spam_apple/samsung/google/multi` rotaciona MAC a cada cycle
+  (~100ms) → > 10 MACs únicos/s broadcasting subtype 0x07 Apple.
+- Threshold 6 MACs únicos/s por vendor com cooldown 3s separa o sinal
+  do ruído ambiente (ambient real: 0–2 MACs/s broadcasting Apple
+  Continuity proximity; ataque: 8–15+).
+
+**Assinaturas detectadas** (mesmas que nosso `hacking_ble.c` emite):
+
+| Vendor | Sinal procurado |
+|---|---|
+| Apple (0) | mfg_data primeiros bytes: `4C 00 07 19` (Apple + subtype Proximity Pairing + length 25) |
+| Samsung (1) | mfg_data primeiros bytes: `75 00 01 00 02 00` (Samsung + EasySetup header) |
+| Google (2) | svc_data UUID 16-bit `0xFE2C` (Fast Pair) |
+
+**Implementação** (`scan_ble.c`):
+- Roda passive `ble_gap_disc` continuamente (mesmo path que `ble_scan` mas
+  com `s_defense_mode = true`).
+- `gap_disc_event_cb` em modo defense:
+  - Parse fields normalmente.
+  - `classify_spam_signature()` retorna 0/1/2 ou -1.
+  - Se ≥ 0, adiciona MAC ao set `s_spam_macs[vendor]` (cap 32, dedup linear).
+  - Não emite `BLE_SCAN_DEV` neste modo (só TLVs de defense).
+- Task `defense_check_task`: sleep 200ms; a cada 1s acumulado checa
+  `s_spam_count[v]` ≥ threshold → emit `DEFENSE_BLE_SPAM 0x35` (com
+  cooldown 3s) e reseta contadores.
+- Stop via `s_defense_stop_requested` ou deadline.
+
+**Fluxo**:
+```
+App ──{"cmd":"ble_defense_start","duration_sec":300}──→ ESP
+ESP ──ack started──→ App
+
+  promisc/scan loop captura advs:
+    iPhone real (Continuity 0x10 handoff) — não classify, ignorado
+    spam Apple do atacante (Continuity 0x07 proximity) — classify=0
+      → adiciona MAC ao set (vendor=Apple)
+    spam novamente com MAC2 — adiciona
+    ... 6 MACs únicos em 800ms
+  
+  defense_check_task (a cada 1s):
+    s_spam_count[Apple] = 8 >= 6 (threshold)
+    cooldown OK
+    ESP ──TLV[0x35] DEFENSE_BLE_SPAM (vendor=0, unique_macs=8, window_ms=1000)──→ App
+    reset s_spam_count
+  
+  fim duration_sec
+  ble_gap_disc_cancel + emit BLE_SCAN_DONE 0x13
+```
+
+**Limitações**:
+- Falso-positivo possível em locais com muitos AirPods reais broadcasting
+  ao mesmo tempo (≥ 6 distintos no raio). Cooldown reduz spam de alerta.
+- Falso-negativo: spam com MAC fixo (caso extremo do nosso `apple_spam`
+  quando GATT está conectado e NimBLE não permite mudar MAC) escapa do
+  detector — rate de MACs únicos é só 1.
+- Detection scope = só Apple/Samsung/Google. Outros spammers (Tile, Microsoft
+  Surface) não cobertos.
+- Mutex com `ble_scan` regular (mesmo `s_busy`). Pode rodar 1 OU outro.
+
+**Combinação natural**:
+- `defense_start` (WiFi) + `ble_defense_start` (BLE) em paralelo →
+  monitor full-stack 24/7. Rádios independentes, sem conflito.
+
+---
+
+## PMKID exposure self-audit (workflow com `pmkid_capture`)
+
+**O que faz**: confirma se a sua própria rede WPA2 é vulnerável a
+ataque PMKID offline (sem cliente). Não é feature firmware nova — é
+um padrão de uso da primitiva `pmkid_capture` apontada pra própria rede.
+
+**Workflow**:
+
+```bash
+# 1. Garante que ESP NÃO está conectado (pra promisc + canal fixo)
+echo '{"cmd":"wifi_disconnect","seq":1}' | scripts/ble_test.py
+
+# 2. Roda scan pra confirmar BSSID + canal da sua rede
+scripts/ble_test.py  # mostra wifi_scan; anote BSSID + channel da sua rede
+
+# 3. Dispara pmkid_capture apontado pra ela
+scripts/pmkid_capture_test.py \
+    --bssid AA:BB:CC:DD:EE:FF --channel 6 \
+    --essid "MinhaCasa" --duration 60
+
+# 4. Em paralelo (outra shell), força associação de algum cliente
+#    (deauth burst no broadcast)
+scripts/deauth_test.py \
+    --bssid AA:BB:CC:DD:EE:FF --channel 6 --count 30
+```
+
+**Interpretação**:
+- Se `pmkid.hc22000` foi gerado (PMKID encontrado): seu AP **expõe** PMKID
+  KDE no M1 → vulnerável a brute-force offline. Mitigação: desabilitar
+  WPS no roteador, ou trocar por WPA3.
+- Se nenhum PMKID após 60s + deauth: AP não expõe PMKID. Não-vulnerável a
+  esse vetor (mas pode ser a outros).
+
+Por que **não** virou comando firmware:
+- Sequência depende de timing (deauth pra forçar handshake) que app/script
+  controlam melhor.
+- `pmkid_capture` exige NOT connected — não dá pra encadear `wifi_connect`
+  + `pmkid_capture` direto.
+- Ferramentas hashcat/aircrack-ng do lado-app já cobrem o restante do
+  audit (cracking).
+
+Marcado no roadmap como "covered by `pmkid_capture` + workflow doc".
 
 ---
 

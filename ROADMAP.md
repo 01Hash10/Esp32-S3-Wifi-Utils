@@ -167,10 +167,10 @@ ou removidos ao longo do projeto.
 - [x] Deauth detector + alerta no app — `defense_start` com `mask & 0x01`, threshold 5/s, TLV `DEFENSE_DEAUTH 0x30`
 - [x] Evil twin detector — `mask & 0x04`, mesmo SSID com 2+ BSSIDs distintos, TLV `DEFENSE_EVIL_TWIN 0x32`
 - [x] Beacon flood detector — `mask & 0x02`, threshold 20 BSSIDs únicos/s, TLV `DEFENSE_BEACON_FLOOD 0x31`
-- [ ] BLE spam detector (matcher de assinaturas conhecidas) — futuro
+- [x] BLE spam detector — `ble_defense_start`, classifica advs por assinatura vendor (Apple Continuity / Samsung EasySetup / Google Fast Pair), alerta quando rate de MACs únicos cruza threshold (6/s/vendor)
 - [ ] Tracker following detector (BLE) — agregação multi-scan, marcado lado-app na Phase 2
 - [x] WiFi Pineapple / Karma detector — `mask & 0x08`, BSSID com bit locally-admin, TLV `DEFENSE_KARMA 0x33`
-- [ ] PMKID exposure scanner (sua própria rede) — pode reusar `pmkid_capture` apontado pra próprio AP
+- [x] PMKID exposure scanner (sua própria rede) — workflow documentado em METHODS.md usando `pmkid_capture` + `deauth` paralelo. Não virou comando firmware separado (timing controlado melhor pelo app/script).
 - [ ] Histórico de eventos persistente (ring buffer + NVS) — bloqueado pela Phase 7
 
 ## Phase 6 — Defense (Active counter-measures)

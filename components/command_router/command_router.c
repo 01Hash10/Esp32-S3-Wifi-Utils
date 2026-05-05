@@ -594,6 +594,35 @@ static void handle_defense_stop(cJSON *root)
     }
 }
 
+static void handle_ble_defense_start(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *dur_j = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 60;
+    if (dur < 0)    dur = 0;
+    if (dur > 3600) dur = 3600;
+
+    esp_err_t err = scan_ble_defense_start((uint16_t)dur);
+    if (err == ESP_OK) {
+        send_ack(seq, "ble_defense_start");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "scan_busy", NULL);
+    } else {
+        send_err(seq, "scan_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_ble_defense_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = scan_ble_defense_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "ble_defense_stop");
+    } else {
+        send_err(seq, "scan_idle", NULL);
+    }
+}
+
 static void handle_evil_twin_start(cJSON *root)
 {
     int seq = seq_of(root);
@@ -1126,6 +1155,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_defense_start(root);
     } else if (strcmp(c, "defense_stop") == 0) {
         handle_defense_stop(root);
+    } else if (strcmp(c, "ble_defense_start") == 0) {
+        handle_ble_defense_start(root);
+    } else if (strcmp(c, "ble_defense_stop") == 0) {
+        handle_ble_defense_stop(root);
     } else if (strcmp(c, "evil_twin_start") == 0) {
         handle_evil_twin_start(root);
     } else if (strcmp(c, "evil_twin_stop") == 0) {
