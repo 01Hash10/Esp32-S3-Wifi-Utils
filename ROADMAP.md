@@ -34,7 +34,7 @@ ou removidos ao longo do projeto.
 - [x] Encoder/decoder JSON minificado (cJSON da IDF)
 - [x] Encoder/decoder TLV binário (componente `protocol`)
 - [x] Command router (dispatch via JSON `cmd` field)
-- [ ] Heartbeat/keepalive bidirecional
+- [x] Heartbeat/keepalive bidirecional (TLV `HEARTBEAT 0x00` periódico do firmware; app continua usando `ping` no reverso)
 - [x] Sequence numbers nos JSON responses
 - [x] Error envelope padronizado (`{err, seq, msg}`)
 - [x] Configuração de MTU (negociar 247)

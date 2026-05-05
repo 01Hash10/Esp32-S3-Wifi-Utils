@@ -1,11 +1,14 @@
 #include "transport_ble.h"
 #include "ble_uuids.h"
+#include "tlv.h"
 
 #include <string.h>
 #include <stdio.h>
 
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "nvs_flash.h"
 
 #include "nimble/nimble_port.h"
@@ -253,6 +256,47 @@ void transport_ble_send_stream(const uint8_t *data, size_t len)
     send_notify(s_stream_attr_handle, s_stream_subscribed, data, len);
 }
 
+// Heartbeat periódico: emite TLV_MSG_HEARTBEAT no stream a cada 5s enquanto
+// houver cliente subscribed. Permite o app detectar conexão "morta" sem
+// precisar fazer polling via ping.
+//
+// Payload (10 bytes):
+//   [0..3] uptime_ms (uint32 BE)
+//   [4..7] free_sram (uint32 BE)
+//   [8..9] free_psram_kb (uint16 BE) — em KB pra caber em 16 bits
+static esp_timer_handle_t s_heartbeat_timer = NULL;
+static uint8_t s_heartbeat_seq = 0;
+
+static void heartbeat_cb(void *arg)
+{
+    (void)arg;
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    if (!s_stream_subscribed) return;
+
+    uint64_t uptime_ms = esp_timer_get_time() / 1000;
+    uint32_t free_sram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    uint32_t free_psram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    uint16_t free_psram_kb = (uint16_t)(free_psram / 1024);
+
+    uint8_t payload[10];
+    payload[0] = (uint8_t)(uptime_ms >> 24);
+    payload[1] = (uint8_t)(uptime_ms >> 16);
+    payload[2] = (uint8_t)(uptime_ms >> 8);
+    payload[3] = (uint8_t)(uptime_ms & 0xFF);
+    payload[4] = (uint8_t)(free_sram >> 24);
+    payload[5] = (uint8_t)(free_sram >> 16);
+    payload[6] = (uint8_t)(free_sram >> 8);
+    payload[7] = (uint8_t)(free_sram & 0xFF);
+    payload[8] = (uint8_t)(free_psram_kb >> 8);
+    payload[9] = (uint8_t)(free_psram_kb & 0xFF);
+
+    uint8_t frame[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(frame, sizeof(frame),
+                           TLV_MSG_HEARTBEAT, s_heartbeat_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(frame, (size_t)total);
+}
+
 esp_err_t transport_ble_init(transport_ble_cmd_handler_t cmd_handler)
 {
     s_cmd_handler = cmd_handler;
@@ -288,5 +332,17 @@ esp_err_t transport_ble_init(transport_ble_cmd_handler_t cmd_handler)
     }
 
     nimble_port_freertos_init(host_task);
+
+    // Inicia heartbeat periódico (5s)
+    const esp_timer_create_args_t hb_args = {
+        .callback = &heartbeat_cb,
+        .name = "ble_heartbeat",
+    };
+    if (esp_timer_create(&hb_args, &s_heartbeat_timer) == ESP_OK) {
+        esp_timer_start_periodic(s_heartbeat_timer, 5000000); // 5s
+    } else {
+        ESP_LOGW(TAG, "heartbeat timer create failed");
+    }
+
     return ESP_OK;
 }

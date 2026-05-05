@@ -195,6 +195,7 @@ Toda resposta de erro segue o schema:
 
 | `type` | Nome | Direção | Payload | Phase |
 |---|---|---|---|---|
+| `0x00` | `HEARTBEAT` | device → app | uptime + free SRAM/PSRAM, emitido a cada 5s | 1 |
 | `0x10` | `WIFI_SCAN_AP` | device → app | 1 AP por frame, schema abaixo | 2 |
 | `0x11` | `WIFI_SCAN_DONE` | device → app | resumo final do scan | 2 |
 | `0x12` | `BLE_SCAN_DEV` | device → app | 1 device por frame (dedup por MAC) | 2 |
@@ -211,6 +212,20 @@ Toda resposta de erro segue o schema:
 | `0x21` | `HACK_BEACON_DONE` | device → app | resultado final do `beacon_flood` | 3 |
 | `0x22` | `HACK_BLE_SPAM_DONE` | device → app | resultado final dos `ble_spam_*` (apple/samsung/google/multi) | 4 |
 | `0x23` | `HACK_JAM_DONE` | device → app | resultado final do `channel_jam` | 3 |
+
+### `0x00 HEARTBEAT` — payload (10 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 4 | `uptime_ms` | uint32 BE, ms desde o boot do firmware |
+| 4 | 4 | `free_sram` | uint32 BE, bytes livres em SRAM interna |
+| 8 | 2 | `free_psram_kb` | uint16 BE, KB livres em PSRAM (KB pra caber em 16 bits) |
+
+> Emitido pelo firmware no `stream` a cada 5s **enquanto há cliente
+> conectado e subscribed**. Não há heartbeat enquanto o ESP está sozinho.
+> O app deve usar como sinal de liveness — se passar > ~12s sem heartbeat,
+> assumir conexão zumbi e reconectar. Para confirmar o reverso (firmware
+> sabe que o app está vivo), o app envia `ping` periódico.
 
 ### `0x10 WIFI_SCAN_AP` — payload
 
@@ -525,3 +540,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3 | Comandos `arp_throttle` / `arp_throttle_stop`: variação do `arp_cut` que alterna ciclos ON (poison) e OFF (restore via ARP corretivo). Vítima fica com internet intermitente. |
 | 2026-05-05 | Phase 3 | Comandos `channel_jam` / `channel_jam_stop`: spam de RTS broadcast com duration alto (~33ms NAV) num canal fixo. Trava airtime, vítimas no canal não conseguem TX/RX. Cap 120s. Novo TLV `HACK_JAM_DONE 0x23`. |
 | 2026-05-05 | Phase 4 | Comandos `ble_spam_samsung`, `ble_spam_google`, `ble_spam_multi`. Reusam pipeline do apple_spam. TLV `HACK_BLE_SPAM_DONE 0x22` ganhou byte `vendor` no payload (0=Apple, 1=Samsung, 2=Google, 0xFF=multi). Backward-compat: app antigo que só lia 4B continua funcionando. |
+| 2026-05-05 | Phase 1 | Heartbeat bidirecional: TLV `HEARTBEAT 0x00` emitido pelo firmware a cada 5s no `stream` (uptime + free SRAM/PSRAM). App detecta liveness sem polling. Reverso (app→firmware) continua via `ping`. |

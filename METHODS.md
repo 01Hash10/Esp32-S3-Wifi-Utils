@@ -19,6 +19,7 @@ firmware, explica:
 ### Phase 1 — Transporte
 - [BLE GATT transport](#ble-gatt-transport-pareamentoadvertising)
 - [Comandos básicos: ping / hello / status](#comandos-basicos-ping--hello--status)
+- [Heartbeat (TLV `HEARTBEAT 0x00`)](#heartbeat--liveness-bidirecional)
 
 ### Phase 2 — Scan
 - [WiFi scan ativo (`wifi_scan`)](#wifi_scan--scan-ativo-de-aps-2-4ghz)
@@ -106,6 +107,53 @@ nas tasks, exceto a string serializada do cJSON.
 APP ──{"cmd":"ping","seq":42}──→ ESP (cmd_ctrl write)
 ESP ──{"resp":"pong","seq":42,"uptime_ms":12345}──→ APP (cmd_ctrl notify)
 ```
+
+---
+
+## Heartbeat — liveness bidirecional
+
+**O que faz**: confirma que ESP e app estão vivos um pro outro sem polling
+agressivo via comando.
+
+**Como funciona** (BLE supervision e application-level liveness):
+- Stack BLE tem supervision timeout (negociado, ~3–6s) — derruba conexão
+  se nada chega no link layer. Mas conexão "zumbi" pode existir se um
+  lado parou de processar dados embora ainda mantenha o link vivo.
+- Solução application-level: cada lado emite sinal periódico de "estou
+  vivo" no protocolo da app.
+
+**Implementação** (`transport_ble.c`):
+- `esp_timer` periódico de 5s (5_000_000 µs).
+- Callback verifica `s_conn_handle != NONE && s_stream_subscribed`.
+  Se sim, monta payload e emite TLV `HEARTBEAT 0x00` via `transport_ble_send_stream`.
+- Payload (10B): uptime_ms (4B BE) + free_sram (4B BE) + free_psram_kb (2B BE).
+- Sem cliente conectado: timer continua rodando mas o callback é early-return.
+- Reverso (app→firmware): app envia `ping` periódico (já existe na Phase 1).
+  Firmware recebe pong e atualiza seu próprio "última atividade do app".
+  (Implementação dessa parte ficaria no firmware se quisermos detectar
+  app-zumbi proativamente — por enquanto não é crítico.)
+
+**Fluxo**:
+```
+ESP timer (5s)              transport_ble.heartbeat_cb
+   ↓
+   conn? subscribed? ─ não → return (sem cliente, sem trabalho)
+   ↓ sim
+   monta payload (uptime, sram, psram)
+   tlv_encode + send_stream → App recebe TLV[0x00]
+
+App
+   recebe HEARTBEAT
+   reseta timer "última heartbeat"
+   se passar > 12s sem nada → assume zumbi → reconnect
+
+App → ESP (ping a cada 10s)
+   ESP responde pong via cmd_ctrl
+```
+
+**Limitações**: só envia quando há cliente conectado (intencional). Não
+substitui supervision timeout do BLE — é camada acima. Custo: 1 timer
+ESP_TIMER + 1 notify a cada 5s (~14 bytes pelo ar) — desprezível.
 
 ---
 
