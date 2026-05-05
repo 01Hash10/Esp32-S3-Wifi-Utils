@@ -15,6 +15,15 @@
 
 static const char *TAG = "sniff-wifi";
 
+// Hook opcional do watchdog. Declarado weak pra não exigir o componente
+// watchdog no build do sniff_wifi. Se watchdog component está linkado,
+// símbolo forte sobrescreve; senão, hook é no-op.
+__attribute__((weak)) void watchdog_hook_evil_twin(const uint8_t bssid_a[6],
+        int8_t rssi_a, const uint8_t bssid_b[6], int8_t rssi_b, uint8_t channel)
+{
+    (void)bssid_a; (void)rssi_a; (void)bssid_b; (void)rssi_b; (void)channel;
+}
+
 #define MAX_DEDUP_ENTRIES   256
 #define MAX_SSID_LEN        32
 
@@ -1437,6 +1446,10 @@ static void promisc_cb_defense(void *buf, wifi_promiscuous_pkt_type_t type)
                 s_def_total_alerts++;
                 e->alerted = true;
                 emit_defense_evil_twin(e);
+                // Watchdog hook: se ativo, dispara contra-ação
+                watchdog_hook_evil_twin(e->bssid_a, e->rssi_a,
+                                         e->bssid_b, e->rssi_b,
+                                         s_current_channel);
             }
         }
     }
@@ -1475,11 +1488,11 @@ static void defense_task(void *arg)
 
     bool hop = (ctx->channel == 0);
     uint8_t ch = hop ? ctx->ch_min : ctx->channel;
-    if (!hop) esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    s_current_channel = ch;
+    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
 
     int64_t window_start_us = esp_timer_get_time();
     int64_t hop_until_us = window_start_us + (hop ? ctx->dwell_ms * 1000 : INT64_MAX/2);
-    if (hop) esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
 
     while (!s_stop && esp_timer_get_time() < deadline_us) {
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -1488,6 +1501,7 @@ static void defense_task(void *arg)
         // Channel hop tick
         if (hop && now >= hop_until_us) {
             ch = (ch >= ctx->ch_max) ? ctx->ch_min : (ch + 1);
+            s_current_channel = ch;
             esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
             hop_until_us = now + ctx->dwell_ms * 1000;
         }

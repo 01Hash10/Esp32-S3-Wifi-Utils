@@ -177,12 +177,12 @@ ou removidos ao longo do projeto.
 
 > ⚠ Uso restrito a redes/dispositivos próprios em laboratório.
 
-- [ ] Anti-deauth: deauth de volta no atacante
-- [ ] Anti-evil-twin: deauth dos clients conectados ao twin
-- [ ] BLE spam jam: flood do canal de adv do atacante
-- [ ] Watchdog mode: detect → ação automática contínua
-- [ ] Rate limiting de contra-medidas (evitar feedback loops)
-- [ ] Whitelist (não atacar BSSIDs/MACs próprios)
+- [blocked] Anti-deauth: **inviável diretamente** (atacante spoofa addr2 = AP legítimo, então direcionar contra-deauth significa deauth no AP). Documentado em METHODS.md. Detecção segue ativa via `defense_start`.
+- [x] Anti-evil-twin: `watchdog_start --actions=1` dispara `deauth(broadcast)` no BSSID twin (heurística locally-admin / RSSI mais fraco)
+- [x] BLE spam jam: `watchdog_start --actions=2` dispara `ble_adv_flood(5s)` quando `DEFENSE_BLE_SPAM` alerta
+- [x] Watchdog mode: detect → ação automática — `watchdog_start` é o framework central que cobre os itens acima
+- [x] Rate limiting de contra-medidas (cooldown_ms + max_actions configuráveis, default 10s/5)
+- [x] Whitelist (array de BSSIDs no `watchdog_start`, max 16, contra-ação skipa target whitelisted)
 
 ## Phase 7 — Persistence & UX (Firmware)
 

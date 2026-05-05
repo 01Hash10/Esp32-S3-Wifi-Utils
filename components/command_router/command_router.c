@@ -8,6 +8,7 @@
 #include "sniff_wifi.h"
 #include "evil_twin.h"
 #include "captive_portal.h"
+#include "watchdog.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -623,6 +624,80 @@ static void handle_ble_defense_stop(cJSON *root)
     }
 }
 
+static void handle_watchdog_start(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *act_j   = cJSON_GetObjectItemCaseSensitive(root, "actions");
+    cJSON *wl_j    = cJSON_GetObjectItemCaseSensitive(root, "whitelist");
+    cJSON *cool_j  = cJSON_GetObjectItemCaseSensitive(root, "cooldown_ms");
+    cJSON *max_j   = cJSON_GetObjectItemCaseSensitive(root, "max_actions");
+
+    int actions = cJSON_IsNumber(act_j) ? act_j->valueint : WATCHDOG_ACTION_ALL;
+    if (actions < 1 || actions > WATCHDOG_ACTION_ALL) {
+        send_err(seq, "bad_actions", "1..3 (bitmask)");
+        return;
+    }
+
+    uint8_t whitelist[16 * 6];
+    size_t n_wl = 0;
+    if (cJSON_IsArray(wl_j)) {
+        int n = cJSON_GetArraySize(wl_j);
+        if (n > 16) {
+            send_err(seq, "bad_whitelist", "max 16");
+            return;
+        }
+        for (int i = 0; i < n; i++) {
+            cJSON *bi = cJSON_GetArrayItem(wl_j, i);
+            if (!cJSON_IsString(bi)) {
+                send_err(seq, "bad_whitelist", "must be array of MAC strings");
+                return;
+            }
+            uint8_t mac[6];
+            if (parse_mac(bi->valuestring, mac) != 0) {
+                send_err(seq, "bad_whitelist", bi->valuestring);
+                return;
+            }
+            memcpy(&whitelist[i * 6], mac, 6);
+            n_wl++;
+        }
+    }
+    int cool = cJSON_IsNumber(cool_j) ? cool_j->valueint : 10000;
+    int max  = cJSON_IsNumber(max_j)  ? max_j->valueint  : 5;
+    if (cool < 100)    cool = 100;
+    if (cool > 600000) cool = 600000;
+    if (max < 1)   max = 1;
+    if (max > 100) max = 100;
+
+    esp_err_t err = watchdog_start((uint8_t)actions,
+                                    n_wl ? whitelist : NULL, n_wl,
+                                    (uint32_t)cool, (uint16_t)max);
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "watchdog_start");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "started");
+        cJSON_AddNumberToObject(resp, "actions", actions);
+        cJSON_AddNumberToObject(resp, "whitelist_count", n_wl);
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "watchdog_busy", NULL);
+    } else {
+        send_err(seq, "bad_args", esp_err_to_name(err));
+    }
+}
+
+static void handle_watchdog_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = watchdog_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "watchdog_stop");
+    } else {
+        send_err(seq, "watchdog_idle", NULL);
+    }
+}
+
 static void handle_evil_twin_start(cJSON *root)
 {
     int seq = seq_of(root);
@@ -1159,6 +1234,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_ble_defense_start(root);
     } else if (strcmp(c, "ble_defense_stop") == 0) {
         handle_ble_defense_stop(root);
+    } else if (strcmp(c, "watchdog_start") == 0) {
+        handle_watchdog_start(root);
+    } else if (strcmp(c, "watchdog_stop") == 0) {
+        handle_watchdog_stop(root);
     } else if (strcmp(c, "evil_twin_start") == 0) {
         handle_evil_twin_start(root);
     } else if (strcmp(c, "evil_twin_stop") == 0) {

@@ -10,6 +10,12 @@
 
 static const char *TAG = "scan-ble";
 
+// Hook fraco do watchdog. Componente watchdog opcional; sem ele, no-op.
+__attribute__((weak)) void watchdog_hook_ble_spam(uint8_t vendor)
+{
+    (void)vendor;
+}
+
 #define MAX_UNIQUE_DEVS  64
 #define MAX_NAME_LEN     32
 #define MAX_MFG_LEN      30
@@ -359,6 +365,8 @@ static void defense_check_task(void *arg)
                     s_spam_last_alert_us[v] = now;
                     ESP_LOGW(TAG, "BLE spam detected: vendor=%d unique_macs=%u",
                              v, (unsigned)cnt);
+                    // Watchdog hook: contra-ação opcional
+                    watchdog_hook_ble_spam((uint8_t)v);
                 }
             }
             s_spam_count[v] = 0;

@@ -17,6 +17,7 @@
 #include "sniff_wifi.h"
 #include "evil_twin.h"
 #include "captive_portal.h"
+#include "watchdog.h"
 
 static const char *TAG = "boot-diag";
 
@@ -51,6 +52,7 @@ void app_main(void)
     ESP_ERROR_CHECK(sniff_wifi_init());
     ESP_ERROR_CHECK(evil_twin_init());
     ESP_ERROR_CHECK(captive_portal_init());
+    ESP_ERROR_CHECK(watchdog_init());
 
     while (1) {
         log_mem();

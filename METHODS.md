@@ -47,6 +47,9 @@ firmware, explica:
 - [BLE spam detector (`ble_defense_start`)](#ble_defense_start--detector-de-ble_spam_-por-rate-de-macs-uacutenicos)
 - [PMKID exposure self-audit (workflow)](#pmkid-exposure-self-audit-workflow-com-pmkid_capture)
 
+### Phase 6 — Active counter-measures
+- [Watchdog (`watchdog_start`)](#watchdog_start--gating-de-contra-acoes-com-rate-limit-e-whitelist)
+
 ### `pcap_start` — streaming de frames 802.11 via BLE
 
 **O que faz**: captura frames 802.11 num canal fixo e os envia em
@@ -664,6 +667,100 @@ Por que **não** virou comando firmware:
   audit (cracking).
 
 Marcado no roadmap como "covered by `pmkid_capture` + workflow doc".
+
+---
+
+## `watchdog_start` — gating de contra-ações com rate-limit e whitelist
+
+**O que faz**: ativa modo "active defense". Quando os detectores
+(`defense_start` / `ble_defense_start`) já em execução cruzam threshold,
+o watchdog dispara contra-ações automáticas:
+
+- **anti_evil_twin** (bit 0): quando `DEFENSE_EVIL_TWIN` alerta, fire
+  `deauth(broadcast)` no BSSID identificado como twin.
+- **ble_spam_jam** (bit 1): quando `DEFENSE_BLE_SPAM` alerta, fire
+  `ble_adv_flood(5s)` pra congestar o canal BLE.
+
+**Anti-deauth NÃO implementado** (motivo): atacantes spoofam o `addr2`
+(source) do frame deauth como sendo o AP legítimo. Direcionar contra-deauth
+ao "atacante" significaria deauth no AP legítimo — não-funcional. Mitigação
+real exige triangulação RF / fingerprint de hardware, fora do escopo
+prático aqui. Detecção segue funcionando via `defense_start`; só não há
+contra-ação automática.
+
+**Heurística de "qual é o twin"** (anti_evil_twin):
+- Dos 2 BSSIDs reportados pra mesmo SSID:
+  - Se um tem bit `0x02` (locally-administered) e outro não → o LA é o twin.
+  - Senão, o de menor RSSI (mais distante, mais provável fake).
+
+**Salvaguardas**:
+- **Whitelist**: array de BSSIDs (max 16) que nunca são alvo. Use pra
+  proteger seus próprios APs em modo evil_twin de teste.
+- **Cooldown_ms**: tempo mínimo entre 2 contra-ações do mesmo tipo
+  (default 10s). Evita feedback loops com detector pegando nossa própria
+  contra-ação.
+- **max_actions**: cap total de contra-ações na sessão (default 5). Pra
+  watchdog rodando 24/7, evita escalada infinita em caso de detector
+  com falso-positivo persistente.
+
+**Implementação** (`watchdog.c` + hooks):
+- Componente `watchdog` mantém estado global (`s_active` flag, mask,
+  whitelist, contadores).
+- Hooks **weak**:
+  - `watchdog_hook_evil_twin(bssid_a, rssi_a, bssid_b, rssi_b, channel)`
+    declarado weak em `sniff_wifi.c` (no-op se watchdog component não
+    linkado). Strong em `watchdog.c`.
+  - `watchdog_hook_ble_spam(vendor)` análogo em `scan_ble.c`.
+- Quando alerta cruza threshold, detector chama o hook. Watchdog:
+  1. Checa `s_active` (no-op se desligado)
+  2. Checa `actions & ACTION_X` (skip se ação não habilitada)
+  3. Checa whitelist → bump `blocked_whitelist`, return
+  4. Checa cooldown + max → bump contador correspondente, return
+  5. Dispara contra-ação async via `hacking_wifi_deauth` ou
+     `hacking_ble_adv_flood` (já são tasks)
+  6. Emite TLV `WATCHDOG_ACTION 0x37` com action_id + target_bssid + status
+
+**Fluxo full**:
+```
+App ──{"cmd":"defense_start","mask":15}──→ ESP                (detectores rodando)
+App ──{"cmd":"ble_defense_start","duration_sec":3600}──→ ESP  (BLE detector rodando)
+App ──{"cmd":"watchdog_start","actions":3,"whitelist":["AA:BB:CC:..."]}──→ ESP
+
+  defense (sniff_wifi) detecta evil_twin → emit TLV[0x32]
+                        → call watchdog_hook_evil_twin(...)
+                        → watchdog: BSSID não na whitelist, cooldown OK
+                        → call hacking_wifi_deauth(broadcast, twin_bssid, ch, 30)
+                        → emit TLV[0x37] WATCHDOG_ACTION action=1
+  
+  scan_ble detecta BLE spam → emit TLV[0x35]
+                        → call watchdog_hook_ble_spam(vendor)
+                        → watchdog: cooldown OK, max não atingido
+                        → call hacking_ble_adv_flood(5s)
+                        → emit TLV[0x37] WATCHDOG_ACTION action=2
+  
+  ... (mais alertas, alguns blocked por cooldown/whitelist)
+  
+App ──{"cmd":"watchdog_stop"}──→ ESP
+ESP ──TLV[0x38] WATCHDOG_DONE (fired=N, blocked_wl=N, blocked_cd=N, blocked_cap=N)──→ App
+```
+
+**Combinação obrigatória**:
+- watchdog SOZINHO não faz nada — precisa que `defense_start` e/ou
+  `ble_defense_start` estejam rodando. Caso contrário, sem alertas → sem
+  hooks → sem contra-ações.
+- App ou playbook (Phase 3.5) deve orquestrar a sequência:
+  ```
+  defense_start → ble_defense_start → watchdog_start
+  ```
+
+**Limitações**:
+- Anti-deauth ausente (já discutido).
+- Watchdog é global (1 instância por boot). Múltiplos perfis de defesa
+  exigiriam stop+start.
+- Whitelist suporta só BSSIDs WiFi; pra BLE spam, vendor é único alvo
+  (não MAC-specific).
+- Falso-positivo no detector → contra-ação errada. Use `cooldown` agressivo
+  + `max_actions` baixo em ambientes desconhecidos.
 
 ---
 

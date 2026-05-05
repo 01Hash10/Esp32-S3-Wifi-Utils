@@ -26,6 +26,7 @@ focando em:
 | `sniff_wifi` | `s_mode` | probe / eapol / pmkid / pcap / karma | 1 promiscuous CB + 1 filter por vez |
 | `evil_twin` | `s_active` | SoftAP fake | Hardware suporta 1 AP só |
 | `captive_portal` | `s_active` | DNS:53 + HTTP:80 servers | Singleton (1 par de tasks ouvindo nas portas) |
+| `watchdog` | `s_active` | gating de contra-ações | Estado global (1 watchdog por boot). Hooks via weak symbols nos detectores |
 
 ### Cross-component (mutex entre componentes diferentes)
 

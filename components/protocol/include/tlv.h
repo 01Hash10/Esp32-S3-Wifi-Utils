@@ -64,6 +64,8 @@ typedef enum {
     TLV_MSG_DEFENSE_KARMA        = 0x33,
     TLV_MSG_DEFENSE_DONE         = 0x34,
     TLV_MSG_DEFENSE_BLE_SPAM     = 0x35,
+    TLV_MSG_WATCHDOG_ACTION      = 0x37,
+    TLV_MSG_WATCHDOG_DONE        = 0x38,
 
     // Captura/dados (0x40–0x4F): streaming de pcap chunks.
     TLV_MSG_PCAP_FRAME         = 0x40,

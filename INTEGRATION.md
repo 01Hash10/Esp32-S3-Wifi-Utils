@@ -137,6 +137,8 @@ Frame:
 | `defense_stop` | `seq` | `{"resp":"defense_stop","seq":N,"status":"started"}`. | 5 |
 | `ble_defense_start` | `seq`, `duration_sec` (opcional, 0=até stop, max 3600, default 60) | `{"resp":"ble_defense_start","seq":N,"status":"started"}`. Detecta `ble_spam_*` por rate de MACs únicos por assinatura vendor. Não emite `BLE_SCAN_DEV` neste modo — só TLV `DEFENSE_BLE_SPAM 0x35` quando threshold cruza. | 5 |
 | `ble_defense_stop` | `seq` | `{"resp":"ble_defense_stop","seq":N,"status":"started"}`. | 5 |
+| `watchdog_start` | `seq`, `actions` (bitmask: 1=anti_evil_twin, 2=ble_spam_jam; default 3=both), `whitelist` (array de BSSIDs MAC strings, max 16, default vazio), `cooldown_ms` (100–600000, default 10000), `max_actions` (1–100, default 5) | `{"resp":"watchdog_start","seq":N,"status":"started","actions":N,"whitelist_count":N}`. **Requer `defense_start` e/ou `ble_defense_start` rodando** pra detectores acionarem hooks. Watchdog dispara contra-ações quando alertas cruzam threshold + alvo não na whitelist + cooldown OK + cap não atingido. Cada contra-ação emite TLV `WATCHDOG_ACTION 0x37`; resumo final via `WATCHDOG_DONE 0x38`. | 6 |
+| `watchdog_stop` | `seq` | `{"resp":"watchdog_stop","seq":N,"status":"started"}`. Emite `WATCHDOG_DONE 0x38` final. | 6 |
 | `evil_twin_start` | `seq`, `ssid` (1–32 chars), `password` (opcional, 8–63 chars; vazio/ausente = open), `channel` (1–13), `max_conn` (opcional, 1–10, default 4) | `{"resp":"evil_twin_start","seq":N,"status":"started","ssid":"...","channel":N,"auth":"open"\|"wpa2"}`. **Requer ESP NÃO conectado**. Cada client que associa emite TLV `EVIL_CLIENT_JOIN`; cada disconnect emite `EVIL_CLIENT_LEAVE`. DHCP automático (default 192.168.4.x). | 3 |
 | `evil_twin_stop` | `seq` | `{"resp":"evil_twin_stop","seq":N,"status":"started"}`. Encerra o AP e volta pra STA-only. | 3 |
 | `captive_portal_start` | `seq`, `html` (opcional, página HTML servida; default = formulário login simples), `redirect_ip` (opcional, default `192.168.4.1`) | `{"resp":"captive_portal_start","seq":N,"status":"started","redirect_ip":"x.x.x.x"}`. **Requer `evil_twin` ativo**. Sobe DNS:53 (responde tudo com `redirect_ip`) + HTTP:80 (serve HTML). Cada query DNS emite TLV `PORTAL_DNS_QUERY`; cada HTTP request emite `PORTAL_HTTP_REQ` (até ~130B do body — pega POST de form com credenciais). | 3 |
@@ -240,6 +242,8 @@ Toda resposta de erro segue o schema:
 | `0x33` | `DEFENSE_KARMA` | device → app | alerta: BSSID com prefix locally-administered (suspeita Karma) | 5 |
 | `0x34` | `DEFENSE_DONE` | device → app | resumo final do `defense_start` | 5 |
 | `0x35` | `DEFENSE_BLE_SPAM` | device → app | alerta: rate alto de MACs broadcasting mesma assinatura vendor BLE | 5 |
+| `0x37` | `WATCHDOG_ACTION` | device → app | contra-ação disparada pelo watchdog (action_id + target_bssid + status) | 6 |
+| `0x38` | `WATCHDOG_DONE` | device → app | resumo final do watchdog (fired + blocked counters) | 6 |
 | `0x40` | `PCAP_FRAME` | device → app | 1 frame 802.11 capturado pelo `pcap_start`, com timestamp relativo | 2 |
 | `0x41` | `PCAP_DONE` | device → app | resumo final do `pcap_start` (emitted/dropped/elapsed) | 2 |
 
@@ -613,6 +617,24 @@ Toda resposta de erro segue o schema:
 | 7 | 1 | `ssid_len` | uint8 |
 | 8 | `ssid_len` | `ssid` | UTF-8 |
 
+### `0x37 WATCHDOG_ACTION` — payload (8 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 1 | `action` | 0x01 = anti_evil_twin, 0x02 = ble_spam_jam |
+| 1 | 6 | `target` | BSSID alvo (anti_evil_twin) ou `{vendor, 0,0,0,0,0}` (ble_spam_jam) |
+| 7 | 1 | `status` | 0 = disparada com sucesso, 1 = falha (componente retornou erro) |
+
+### `0x38 WATCHDOG_DONE` — payload (12 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `actions_fired` | uint16 BE, contra-ações executadas com sucesso |
+| 2 | 2 | `blocked_whitelist` | uint16 BE, alvos ignorados por estarem na whitelist |
+| 4 | 2 | `blocked_cooldown` | uint16 BE, alertas dentro do cooldown |
+| 6 | 2 | `blocked_cap` | uint16 BE, alertas após max_actions atingido |
+| 8 | 4 | `elapsed_ms` | uint32 BE |
+
 ### `0x35 DEFENSE_BLE_SPAM` — payload (4 bytes)
 
 | Offset | Tamanho | Campo | Descrição |
@@ -764,3 +786,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 4 | Comando `ble_adv_flood`: DoS via channel congestion. Loop tight de adv com payload random + interval mínimo (20ms × 3 canais ≈ 75 PDUs/s). Novo TLV `BLE_FLOOD_DONE 0x2F`. Cap duration 60s pra não fritar. Active scan abuse: já coberto pelo `ble_scan mode=active` (Phase 2). |
 | 2026-05-05 | Phase 5 | Comandos `defense_start` / `defense_stop`: 4 detectores em paralelo (deauth storm / beacon flood / evil twin / karma) via promiscuous mgmt. Novos TLVs `DEFENSE_DEAUTH 0x30`, `DEFENSE_BEACON_FLOOD 0x31`, `DEFENSE_EVIL_TWIN 0x32`, `DEFENSE_KARMA 0x33`, `DEFENSE_DONE 0x34`. Cooldown de 3s entre alertas do mesmo tipo. Channel hop opcional. Cap 1h. Faixa 0x30–0x3F (defense events) inaugurada. |
 | 2026-05-05 | Phase 5 | Comandos `ble_defense_start` / `ble_defense_stop`: detector de `ble_spam_*` via rate de MACs únicos por assinatura vendor (Apple Continuity / Samsung EasySetup / Google Fast Pair). Novo TLV `DEFENSE_BLE_SPAM 0x35` (vendor + unique_macs + window_ms). Threshold 6/s, cooldown 3s. |
+| 2026-05-05 | Phase 6 | Comandos `watchdog_start` / `watchdog_stop`: counter-measures gating sobre os detectores. Actions: `anti_evil_twin` (deauth no BSSID twin) e `ble_spam_jam` (ble_adv_flood). Whitelist + cooldown_ms + max_actions. Novos TLVs `WATCHDOG_ACTION 0x37` e `WATCHDOG_DONE 0x38`. Hooks em `sniff_wifi.c` (evil_twin) e `scan_ble.c` (BLE spam) via weak symbols — watchdog opcional no build. Anti-deauth NÃO implementado (MAC spoofing torna direcionar contra-deauth no atacante real inviável). |
