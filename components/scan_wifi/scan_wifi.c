@@ -20,13 +20,22 @@ static int64_t s_started_us = 0;
 static uint8_t s_seq = 0;
 
 // Layout do payload TLV_MSG_WIFI_SCAN_AP (sem fragmentação,
-// max ssid 32 → 42 bytes total payload, cabe em 1 frame BLE):
+// max ssid 32 → 43 bytes total payload, cabe em 1 frame BLE):
 //   [0..5]  bssid (6 bytes)
 //   [6]     rssi (int8)
 //   [7]     primary channel (uint8)
 //   [8]     auth_mode (uint8 = wifi_auth_mode_t)
-//   [9]     ssid_len (uint8, max 32)
+//   [9]     ssid_len (uint8, max 32) — 0 implica hidden, mas use o flag
 //   [10..]  ssid bytes (UTF-8, sem terminador)
+//   [10+ssid_len] flags (uint8) — NOVO no 0xc0c7b49+:
+//                  bit 0 = hidden (SSID em beacon vazio)
+//                  bit 1 = WPS habilitado
+//                  bit 2 = 802.11 phy_11b
+//                  bit 3 = 802.11 phy_11n
+//                  bits 4..7 = reservado
+//
+// App antigo que parou de ler em 10+ssid_len continua funcionando (não vê
+// flags). App novo lê 1 byte adicional após o ssid.
 //
 // Layout do payload TLV_MSG_WIFI_SCAN_DONE (7 bytes):
 //   [0..1]  ap_count (uint16 BE)
@@ -35,7 +44,7 @@ static uint8_t s_seq = 0;
 
 static void emit_ap(const wifi_ap_record_t *rec)
 {
-    uint8_t payload[10 + 33];
+    uint8_t payload[10 + 33 + 1];
     memcpy(&payload[0], rec->bssid, 6);
     payload[6] = (uint8_t)rec->rssi;
     payload[7] = rec->primary;
@@ -45,10 +54,17 @@ static void emit_ap(const wifi_ap_record_t *rec)
     payload[9] = (uint8_t)ssid_len;
     memcpy(&payload[10], rec->ssid, ssid_len);
 
+    uint8_t flags = 0;
+    if (ssid_len == 0)        flags |= 0x01; // hidden
+    if (rec->wps)             flags |= 0x02; // WPS habilitado (IDF parseou IE)
+    if (rec->phy_11b)         flags |= 0x04;
+    if (rec->phy_11n)         flags |= 0x08;
+    payload[10 + ssid_len] = flags;
+
     uint8_t frame[TLV_MAX_FRAME_SIZE];
     int total = tlv_encode(frame, sizeof(frame),
                            TLV_MSG_WIFI_SCAN_AP, s_seq++,
-                           payload, 10 + ssid_len);
+                           payload, 11 + ssid_len);
     if (total > 0 && s_emit) {
         s_emit(frame, (size_t)total);
     }
@@ -106,24 +122,28 @@ static void scan_done_handler(void *arg, esp_event_base_t base,
     s_busy = false;
 }
 
-esp_err_t scan_wifi_start_active(void)
+esp_err_t scan_wifi_start(scan_wifi_mode_t mode, uint8_t channel)
 {
-    if (s_busy) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    if (s_busy) return ESP_ERR_INVALID_STATE;
+    if (channel > 13) return ESP_ERR_INVALID_ARG;
     s_busy = true;
     s_started_us = esp_timer_get_time();
 
     wifi_scan_config_t cfg = {
         .ssid = NULL,
         .bssid = NULL,
-        .channel = 0, // todos os canais
+        .channel = channel, // 0 = todos os canais
         .show_hidden = true,
-        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
-        .scan_time = {
-            .active = { .min = 80, .max = 120 },
-        },
+        .scan_type = (mode == SCAN_WIFI_MODE_PASSIVE)
+                       ? WIFI_SCAN_TYPE_PASSIVE
+                       : WIFI_SCAN_TYPE_ACTIVE,
     };
+    if (mode == SCAN_WIFI_MODE_PASSIVE) {
+        cfg.scan_time.passive = 360; // ms por canal — beacons ~100ms cada
+    } else {
+        cfg.scan_time.active.min = 80;
+        cfg.scan_time.active.max = 120;
+    }
 
     esp_err_t err = esp_wifi_scan_start(&cfg, false);
     if (err != ESP_OK) {
@@ -132,6 +152,11 @@ esp_err_t scan_wifi_start_active(void)
         emit_done(0, 0, 1);
     }
     return err;
+}
+
+esp_err_t scan_wifi_start_active(void)
+{
+    return scan_wifi_start(SCAN_WIFI_MODE_ACTIVE, 0);
 }
 
 esp_err_t scan_wifi_init(scan_wifi_emit_t emit)

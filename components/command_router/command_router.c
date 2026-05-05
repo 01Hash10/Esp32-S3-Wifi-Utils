@@ -89,7 +89,19 @@ static void send_ack(int seq, const char *cmd)
 static void handle_wifi_scan(cJSON *root)
 {
     int seq = seq_of(root);
-    esp_err_t err = scan_wifi_start_active();
+    cJSON *mode_j = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    cJSON *ch_j   = cJSON_GetObjectItemCaseSensitive(root, "channel");
+
+    scan_wifi_mode_t mode = SCAN_WIFI_MODE_ACTIVE;
+    if (cJSON_IsString(mode_j) && mode_j->valuestring) {
+        if (strcmp(mode_j->valuestring, "passive") == 0)      mode = SCAN_WIFI_MODE_PASSIVE;
+        else if (strcmp(mode_j->valuestring, "active") == 0)  mode = SCAN_WIFI_MODE_ACTIVE;
+        else { send_err(seq, "bad_mode", "active|passive"); return; }
+    }
+    int ch = cJSON_IsNumber(ch_j) ? ch_j->valueint : 0;
+    if (ch < 0 || ch > 13) { send_err(seq, "bad_channel", "0..13"); return; }
+
+    esp_err_t err = scan_wifi_start(mode, (uint8_t)ch);
     if (err == ESP_OK) {
         send_ack(seq, "wifi_scan");
     } else if (err == ESP_ERR_INVALID_STATE) {

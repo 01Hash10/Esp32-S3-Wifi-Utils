@@ -44,15 +44,15 @@ ou removidos ao longo do projeto.
 
 ### WiFi
 - [x] Scan ativo (probe request)
-- [ ] Scan passivo (channel hop + listen)
+- [x] Scan passivo (`wifi_scan` com `mode:"passive"` — só escuta beacons)
 - [x] Stream contínuo de results pro app
-- [ ] Channel hopping configurável
-- [ ] Decoding: BSSID, SSID, RSSI, canal, segurança, hidden flag
-- [ ] Lookup de OUI (vendor a partir do MAC)
-- [ ] Detecção de WPS habilitado
-- [ ] Histórico de RSSI por BSSID
-- [ ] Captura de pcap (promiscuous → flash storage)
-- [ ] Export de pcap via BLE pro app
+- [x] Channel hopping configurável (`wifi_scan` com `channel:0..13` — single ou todos)
+- [x] Decoding: BSSID, SSID, RSSI, canal, segurança, **hidden flag** (bit0), phy_11b/n flags
+- [ ] Lookup de OUI (vendor a partir do MAC) — **lado-app** (tabela OUI ~50KB; firmware emite MAC, app resolve vendor)
+- [x] Detecção de WPS habilitado (flag bit1 no `WIFI_SCAN_AP`)
+- [ ] Histórico de RSSI por BSSID — **lado-app** (agregação multi-scan)
+- [ ] Captura de pcap (promiscuous streaming, sem storage no ESP) — vai virar TLV faixa 0x40
+- [ ] Export de pcap via BLE pro app — junto com o item acima
 
 ### BLE
 - [x] Scan passivo (NimBLE GAP discover)

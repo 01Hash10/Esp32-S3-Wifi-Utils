@@ -38,9 +38,16 @@ def decode_wifi_ap(payload: bytes) -> dict:
     auth = payload[8]
     ssid_len = payload[9]
     ssid = payload[10:10 + ssid_len].decode("utf-8", errors="replace")
+    flags = payload[10 + ssid_len] if len(payload) > 10 + ssid_len else 0
+    flag_str = []
+    if flags & 0x01: flag_str.append("hidden")
+    if flags & 0x02: flag_str.append("WPS")
+    if flags & 0x04: flag_str.append("11b")
+    if flags & 0x08: flag_str.append("11n")
     return {
         "bssid": bssid, "rssi": rssi, "channel": channel,
         "auth": auth, "ssid": ssid or "<hidden>",
+        "flags": flags, "flag_str": ",".join(flag_str) or "-",
     }
 
 
@@ -145,7 +152,7 @@ async def run_ping(client: BleakClient):
         if mtype == 0x10:
             ap = decode_wifi_ap(payload)
             aps.append(ap)
-            print(f"  AP  ssid={ap['ssid']!r:<32} bssid={ap['bssid']} rssi={ap['rssi']} ch={ap['channel']} auth={ap['auth']}")
+            print(f"  AP  ssid={ap['ssid']!r:<32} bssid={ap['bssid']} rssi={ap['rssi']} ch={ap['channel']} auth={ap['auth']} [{ap['flag_str']}]")
         elif mtype == 0x11:
             done = decode_wifi_done(payload)
             print(f"\nSCAN_DONE: {done['ap_count']} APs in {done['scan_ms']}ms (received {len(aps)}, status={done['status']})")

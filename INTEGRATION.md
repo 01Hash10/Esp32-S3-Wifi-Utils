@@ -104,7 +104,7 @@ Frame:
 | `ping` | `seq` | `{"resp":"pong","seq":N,"uptime_ms":N}` | 1 |
 | `hello` | `seq` | `{"resp":"hello","seq":N,"fw":...,"idf":...,"chip":...,"cores":N,"rev":N}` | 1 |
 | `status` | `seq` | `{"resp":"status","seq":N,"uptime_ms":N,"free_sram":N,"free_psram":N,"min_free_sram":N}` | 1 |
-| `wifi_scan` | `seq` | `{"resp":"wifi_scan","seq":N,"status":"started"}` (ack imediato; resultados via `stream`) | 2 |
+| `wifi_scan` | `seq`, `mode` (opcional, `"active"`/`"passive"`, default `"active"`), `channel` (opcional, 0=todos / 1–13=specific, default 0) | `{"resp":"wifi_scan","seq":N,"status":"started"}` (ack imediato; resultados via `stream`). Passivo é silencioso (sem probe req) mas demora ~360ms por canal. | 2 |
 | `ble_scan` | `seq`, `duration_sec` (opcional, default 10, max 599; 0 = até `ble_scan_stop`) | `{"resp":"ble_scan","seq":N,"status":"started"}` | 2 |
 | `ble_scan_stop` | `seq` | `{"resp":"ble_scan_stop","seq":N,"status":"started"}` (encerra scan em andamento) | 2 |
 | `deauth` | `seq`, `bssid` (string), `target` (string, opcional, default broadcast), `channel` (1–14), `count` (opcional, default 10, max 1000), `reason` (opcional, default 7) | `{"resp":"deauth","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_DEAUTH_DONE` no `stream`). Roda em task assíncrona pra não bloquear BLE. | 3 |
@@ -237,6 +237,7 @@ Toda resposta de erro segue o schema:
 | 8 | 1 | `auth_mode` | uint8, ver tabela abaixo |
 | 9 | 1 | `ssid_len` | uint8, comprimento do SSID em bytes (0–32) |
 | 10 | `ssid_len` | `ssid` | UTF-8, sem NUL terminador |
+| 10+ssid_len | 1 | `flags` | bit0=hidden, bit1=WPS, bit2=phy_11b, bit3=phy_11n, bits4..7=reservado. **Adicionado em 2026-05-05** (apps antigos que param em ssid continuam OK) |
 
 **Auth mode** (valor de `wifi_auth_mode_t` do ESP-IDF):
 
@@ -541,3 +542,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3 | Comandos `channel_jam` / `channel_jam_stop`: spam de RTS broadcast com duration alto (~33ms NAV) num canal fixo. Trava airtime, vítimas no canal não conseguem TX/RX. Cap 120s. Novo TLV `HACK_JAM_DONE 0x23`. |
 | 2026-05-05 | Phase 4 | Comandos `ble_spam_samsung`, `ble_spam_google`, `ble_spam_multi`. Reusam pipeline do apple_spam. TLV `HACK_BLE_SPAM_DONE 0x22` ganhou byte `vendor` no payload (0=Apple, 1=Samsung, 2=Google, 0xFF=multi). Backward-compat: app antigo que só lia 4B continua funcionando. |
 | 2026-05-05 | Phase 1 | Heartbeat bidirecional: TLV `HEARTBEAT 0x00` emitido pelo firmware a cada 5s no `stream` (uptime + free SRAM/PSRAM). App detecta liveness sem polling. Reverso (app→firmware) continua via `ping`. |
+| 2026-05-05 | Phase 2 | `wifi_scan` ganha args opcionais `mode` (`active`/`passive`) e `channel` (0/1–13). TLV `WIFI_SCAN_AP 0x10` ganha 1 byte `flags` no final (hidden, WPS, phy_11b, phy_11n) — backward-compat (apps antigos que param em ssid não veem o byte). |

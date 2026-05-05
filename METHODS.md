@@ -157,40 +157,61 @@ ESP_TIMER + 1 notify a cada 5s (~14 bytes pelo ar) — desprezível.
 
 ---
 
-## `wifi_scan` — scan ativo de APs 2.4GHz
+## `wifi_scan` — scan ativo/passivo de APs 2.4GHz
 
-**O que faz**: lista APs visíveis (BSSID, SSID, RSSI, canal, auth_mode).
+**O que faz**: lista APs visíveis (BSSID, SSID, RSSI, canal, auth_mode,
++ flags hidden/WPS/phy). Suporta scan **ativo** (envia probe req) e
+**passivo** (só escuta beacons).
 
-**Como funciona** (802.11 active scan):
-- Para cada canal 1..13, ESP envia **probe request** (broadcast ou wildcard SSID).
-- APs respondem com **probe response** contendo Beacon-like info (SSID,
-  capabilities, supported rates, RSN IE).
-- ESP coleta respostas + beacons capturados durante a janela.
+**Como funciona**:
+- **Ativo** (default): ESP envia probe request broadcast por canal. APs
+  respondem com probe response. Rápido (~80–120ms por canal) mas anuncia
+  presença.
+- **Passivo**: ESP só escuta beacons (~100ms a cada 100ms cada AP envia
+  beacon). Silencioso, mas demora mais (~360ms por canal).
+
+**WPS detection**: o IDF parseia o WPS IE (Microsoft OUI `00:50:F2`
+type `0x04`) durante o scan e popula `wifi_ap_record_t.wps`. Expomos
+isso como flag bit 1 no payload TLV.
+
+**Hidden detection**: AP com SSID vazio em beacon (broadcast suprimido).
+`ssid_len == 0` → flag bit 0 setado.
 
 **Implementação** (`scan_wifi.c`):
-- `esp_wifi_scan_start(active, all_channels)` — async.
-- `WIFI_EVENT_SCAN_DONE` dispara handler que pega `wifi_ap_record_t[]` via
-  `esp_wifi_scan_get_ap_records`.
-- Para cada record, codifica payload TLV `WIFI_SCAN_AP 0x10` (10B header +
-  ssid_len ssid bytes) e envia via `transport_ble_send_stream`.
-- Após emitir todos, envia `WIFI_SCAN_DONE 0x11` com totalizador.
-- `vTaskDelay(5ms)` entre frames pra não saturar fila do GATT notify.
+- API: `scan_wifi_start(mode, channel)` — mode = ACTIVE/PASSIVE,
+  channel = 0 (todos) ou 1..13.
+- `wifi_scan_config_t` configurado:
+  - `scan_type = WIFI_SCAN_TYPE_ACTIVE` ou `_PASSIVE`
+  - `scan_time.passive = 360` ms (passive) OR `scan_time.active = {min:80, max:120}`
+  - `show_hidden = true` (sempre captura hidden)
+- `WIFI_EVENT_SCAN_DONE` dispara handler que pega `wifi_ap_record_t[]`
+  via `esp_wifi_scan_get_ap_records`.
+- Para cada record, codifica payload TLV `WIFI_SCAN_AP 0x10`:
+  - bssid (6) + rssi (1) + channel (1) + auth_mode (1) + ssid_len (1)
+    + ssid (variable) + **flags (1)**.
+  - Flags bits: 0=hidden, 1=WPS, 2=phy_11b, 3=phy_11n.
+- Envia via `transport_ble_send_stream`, com `vTaskDelay(5ms)` entre frames.
+- Final: `WIFI_SCAN_DONE 0x11`.
 
 **Fluxo**:
 ```
-App ──{"cmd":"wifi_scan"}──→ ESP
+App ──{"cmd":"wifi_scan","mode":"passive","channel":0}──→ ESP
 ESP ──{"resp":"wifi_scan","status":"started"}──→ App  (ack imediato)
    ┌────────────────── 2.4GHz radio ──────────────────┐
-   │ ch1 → probe_req → probe_resp/beacon ... ch13     │
+   │ passive: ch1 (listen 360ms) → ch2 → ... → ch13   │
+   │ active : ch1 (probe→resp 80–120ms) → ch2 → ...   │
    └──────────────────────────────────────────────────┘
-ESP ──TLV[0x10] AP1──→ App
-ESP ──TLV[0x10] AP2──→ App
+ESP ──TLV[0x10] AP1 (flags: hidden=0, wps=1)──→ App
+ESP ──TLV[0x10] AP2 (flags: hidden=1, wps=0)──→ App
 ...
 ESP ──TLV[0x11] DONE──→ App
 ```
 
 **Limitações**: só 2.4GHz (S3 não tem 5GHz). Hidden SSIDs aparecem com
-`ssid_len=0`.
+`ssid_len=0` e flag bit 0 setado. WPS detection depende do AP anunciar
+o WPS IE em beacons/probe responses. Channel hopping configurável só
+suporta single-channel ou all (não range arbitrário — limitação do
+`esp_wifi_scan_start`). Para range customizado, app pode iterar canais.
 
 ---
 
