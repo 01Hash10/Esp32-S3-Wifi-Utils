@@ -38,6 +38,7 @@ firmware, explica:
 - [PMKID capture (`pmkid_capture`)](#pmkid_capture--extracao-de-pmkid-do-m1)
 - [Pcap streaming (`pcap_start`)](#pcap_start--streaming-de-frames-80211-via-ble)
 - [Karma attack (`karma_start`)](#karma_start--responde-probes-com-probe-response-forjado)
+- [Evil Twin AP (`evil_twin_start`)](#evil_twin_start--softap-fake-com-tracking-de-clients)
 
 ### `pcap_start` — streaming de frames 802.11 via BLE
 
@@ -201,6 +202,75 @@ ESP ──ack──→ App
 - Mapear preferred networks de devices nearby (privacy reveal).
 - Pré-passo pra Evil Twin: descobrir quais SSIDs spoofar.
 - Pesquisa de segurança em redes próprias.
+
+---
+
+## `evil_twin_start` — SoftAP fake com tracking de clients
+
+**O que faz**: o ESP sobe um Access Point real com SSID/canal/senha
+escolhidos pelo app. Devices na vizinhança que conhecem aquele SSID
+(ex: descoberto via `karma_start` antes) podem associar achando que é
+o legítimo. ESP emite TLV pra cada associação/desassociação — base pra
+captive portal e MITM em rede do atacante.
+
+**Como funciona** (802.11 SoftAP):
+- Modo `WIFI_MODE_APSTA`: rádio fica simultaneamente em STA (pra scan/promisc
+  funcionarem) **e** AP (anunciando beacons + aceitando assoc).
+- ESP-IDF `esp_netif_create_default_wifi_ap()` instancia netif com IP
+  192.168.4.1/24 e DHCP server **automático** que atribui leases na
+  range 192.168.4.2..N.
+- `wifi_config_t.ap.{ssid, password, channel, max_connection, authmode}`
+  configura o AP.
+- Eventos `WIFI_EVENT_AP_STACONNECTED` / `STADISCONNECTED` disparam
+  callbacks com MAC + AID (assoc id) / reason code.
+
+**Implementação** (`evil_twin.c`):
+- `evil_twin_init()` registra handler genérico `WIFI_EVENT, ESP_EVENT_ANY_ID`.
+  Filtra pelos 2 IDs de interesse e emite TLVs.
+- `evil_twin_start(ssid, psk, channel, max_conn)`:
+  - Validações: SSID 1–32 chars, PSK 8–63 ou NULL/"" (open), channel 1–13.
+  - `esp_netif_create_default_wifi_ap()` lazily na primeira call.
+  - `esp_wifi_set_mode(APSTA)`.
+  - `esp_wifi_set_config(AP, &cfg)` com WPA2_PSK ou OPEN.
+  - PMF capable (não required) pra compat com clients que pedem MFP.
+- `evil_twin_stop()`: volta pra `WIFI_MODE_STA` — beacon do AP para,
+  clients reconectados ao AP perdem a associação.
+
+**Fluxo**:
+```
+App ──{"cmd":"evil_twin_start","ssid":"FreeWifi","channel":6,"password":""}──→ ESP
+ESP ──{"resp":"evil_twin_start","status":"started","ssid":"FreeWifi",...}──→ App
+
+  ESP entra em APSTA, beacon "FreeWifi" no ch=6
+  cliente próximo (que tem "FreeWifi" salvo) associa:
+    auth + assoc + (4-way handshake se WPA2)
+    DHCP request → ESP responde com 192.168.4.X
+  WIFI_EVENT_AP_STACONNECTED dispara
+  ESP ──TLV[0x26] EVIL_CLIENT_JOIN (mac, aid)──→ App
+  
+  cliente sai (out of range / explicit disconnect)
+  WIFI_EVENT_AP_STADISCONNECTED
+  ESP ──TLV[0x27] EVIL_CLIENT_LEAVE (mac, reason)──→ App
+
+App ──{"cmd":"evil_twin_stop","seq":2}──→ ESP
+ESP volta pra WIFI_MODE_STA, AP some
+```
+
+**Combinação com outros métodos**:
+- `karma_start` antes pra mapear PNL e descobrir SSIDs preferidos
+- `deauth` em paralelo pro AP legítimo, forçando clients a re-tentarem
+  (e pegando o nosso fake)
+- `pcap_start` no mesmo canal pra capturar tráfego do client associado
+- (futuro) captive portal pra interceptar credenciais HTTP
+
+**Limitações**:
+- ESP suporta no máx ~10 clients simultâneos (limite SoftAP do IDF).
+- Sem captive portal nesta versão: cliente associa, recebe IP, mas
+  não tem internet/redirecionamento. Vamos adicionar DNS hijack +
+  HTTP server numa próxima feature.
+- WPA3 não suportado no SoftAP (hoje só OPEN ou WPA2-PSK).
+- Modo APSTA tem trade-offs: rádio dividido entre AP beacon e qualquer
+  scan ativo do STA — pode ter clients reportando RSSI inferior.
 
 ---
 

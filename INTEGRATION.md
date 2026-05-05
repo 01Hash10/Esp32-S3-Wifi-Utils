@@ -132,6 +132,8 @@ Frame:
 | `pcap_stop` | `seq` | `{"resp":"pcap_stop","seq":N,"status":"started"}`. | 2 |
 | `karma_start` | `seq`, `channel` (1–13), `duration_sec` (opcional, 1–300, default 60) | `{"resp":"karma_start","seq":N,"status":"started"}` (ack imediato; cada (mac, ssid) único via TLV `KARMA_HIT`, fim via `KARMA_DONE`). **Requer ESP NÃO conectado**. ESP escuta probe req direcionados e responde com probe response forjado — devices que tinham o SSID na PNL podem tentar associar. | 3 |
 | `karma_stop` | `seq` | `{"resp":"karma_stop","seq":N,"status":"started"}`. | 3 |
+| `evil_twin_start` | `seq`, `ssid` (1–32 chars), `password` (opcional, 8–63 chars; vazio/ausente = open), `channel` (1–13), `max_conn` (opcional, 1–10, default 4) | `{"resp":"evil_twin_start","seq":N,"status":"started","ssid":"...","channel":N,"auth":"open"\|"wpa2"}`. **Requer ESP NÃO conectado**. Cada client que associa emite TLV `EVIL_CLIENT_JOIN`; cada disconnect emite `EVIL_CLIENT_LEAVE`. DHCP automático (default 192.168.4.x). | 3 |
+| `evil_twin_stop` | `seq` | `{"resp":"evil_twin_stop","seq":N,"status":"started"}`. Encerra o AP e volta pra STA-only. | 3 |
 
 ### Erros padronizados
 
@@ -218,6 +220,8 @@ Toda resposta de erro segue o schema:
 | `0x23` | `HACK_JAM_DONE` | device → app | resultado final do `channel_jam` | 3 |
 | `0x24` | `KARMA_HIT` | device → app | 1 (mac, ssid) único respondido pelo Karma | 3 |
 | `0x25` | `KARMA_DONE` | device → app | resumo final do `karma_start` | 3 |
+| `0x26` | `EVIL_CLIENT_JOIN` | device → app | client associou ao Evil Twin AP (mac, aid) | 3 |
+| `0x27` | `EVIL_CLIENT_LEAVE` | device → app | client desassociou (mac, reason) | 3 |
 | `0x40` | `PCAP_FRAME` | device → app | 1 frame 802.11 capturado pelo `pcap_start`, com timestamp relativo | 2 |
 | `0x41` | `PCAP_DONE` | device → app | resumo final do `pcap_start` (emitted/dropped/elapsed) | 2 |
 
@@ -456,6 +460,20 @@ Toda resposta de erro segue o schema:
 | 6 | 4 | `elapsed_ms` | uint32 BE |
 | 10 | 1 | `status` | 0 = ok, 2 = erro (falha no promiscuous) |
 
+### `0x26 EVIL_CLIENT_JOIN` — payload (8 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `mac` | MAC do client que associou (BE) |
+| 6 | 2 | `aid` | uint16 BE, association ID atribuído pelo SoftAP |
+
+### `0x27 EVIL_CLIENT_LEAVE` — payload (7 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `mac` | MAC do client que saiu (BE) |
+| 6 | 1 | `reason` | reason code 802.11 (1=unspecified, 7=class3 frame, etc) |
+
 ### `0x40 PCAP_FRAME` — payload
 
 | Offset | Tamanho | Campo | Descrição |
@@ -607,3 +625,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 2 | `ble_scan` ganha arg `mode` (`active`/`passive`). TLV `BLE_SCAN_DEV 0x12` ganha 1 byte `tracker` no final classificando AirTag/SmartTag/Tile/Chipolo — backward-compat. |
 | 2026-05-05 | Phase 2 | Comandos `pcap_start` / `pcap_stop`: streaming de frames 802.11 sem storage local. Filtros mgmt/data/ctrl + opcional BSSID. Rate-limit interno ~5ms (~200 fps). Novos TLVs `PCAP_FRAME 0x40` (ts + orig_len + flags + frame até 236B) e `PCAP_DONE 0x41` (emitted/dropped/elapsed). Faixa 0x40–0x4F (captura/dados) inaugurada. |
 | 2026-05-05 | Phase 3 | Comandos `karma_start` / `karma_stop`: Karma attack. ESP escuta probe req direcionados num canal e responde imediatamente com probe response forjado (BSSID = hash do SSID + locally-administered prefix). Novos TLVs `KARMA_HIT 0x24` (mac, ssid) único + `KARMA_DONE 0x25` (hits, unique clients, unique ssids, elapsed). |
+| 2026-05-05 | Phase 3 | Comandos `evil_twin_start` / `evil_twin_stop`: SoftAP fake (modo APSTA) com SSID/canal/password configurável + DHCP automático. Novos TLVs `EVIL_CLIENT_JOIN 0x26` (mac+aid) e `EVIL_CLIENT_LEAVE 0x27` (mac+reason) emitidos quando devices entram/saem do AP. Captive portal (DNS hijack + HTTP) é feature separada futura. |

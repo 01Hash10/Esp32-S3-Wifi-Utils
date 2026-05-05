@@ -46,6 +46,8 @@ typedef enum {
     TLV_MSG_HACK_JAM_DONE      = 0x23,
     TLV_MSG_KARMA_HIT          = 0x24,
     TLV_MSG_KARMA_DONE         = 0x25,
+    TLV_MSG_EVIL_CLIENT_JOIN   = 0x26,
+    TLV_MSG_EVIL_CLIENT_LEAVE  = 0x27,
 
     // Captura/dados (0x40–0x4F): streaming de pcap chunks.
     TLV_MSG_PCAP_FRAME         = 0x40,

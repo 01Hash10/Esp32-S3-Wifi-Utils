@@ -95,7 +95,7 @@ ou removidos ao longo do projeto.
 - [x] PMKID capture (`pmkid_capture` — extrai PMKID KDE do M1, hash hashcat WPA*02)
 - [x] Probe request sniffing (`probe_sniff` + dedup por mac/ssid + channel hop)
 - [ ] Dossiê de devices a partir de probe history (lado app — agregação multi-sessão)
-- [ ] Evil twin / Captive portal (AP fake + DNS hijack)
+- [~] Evil twin (`evil_twin_start` — SoftAP fake + DHCP + tracking de clients via TLVs `EVIL_CLIENT_JOIN`/`LEAVE`). Captive portal (DNS hijack + HTTP) ainda a fazer em commit separado.
 - [x] Karma attack — `karma_start`: escuta probe req direcionado, responde com probe response forjado (BSSID = hash do SSID + prefix `0x02`). Útil pra mapear PNL; pra completar assoc precisa de Evil Twin.
 - [ ] WPS attack (Pixie Dust — viabilidade no S3 a confirmar)
 - [x] Channel jamming via RTS NAV-lock (`channel_jam`) — não é CW puro mas trava airtime efetivamente

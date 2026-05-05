@@ -6,6 +6,7 @@
 #include "hacking_ble.h"
 #include "attack_lan.h"
 #include "sniff_wifi.h"
+#include "evil_twin.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -536,6 +537,64 @@ static void handle_karma_stop(cJSON *root)
     }
 }
 
+static void handle_evil_twin_start(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (attack_lan_is_connected()) {
+        send_err(seq, "wifi_busy", "disconnect first");
+        return;
+    }
+
+    cJSON *ssid_j = cJSON_GetObjectItemCaseSensitive(root, "ssid");
+    cJSON *psk_j  = cJSON_GetObjectItemCaseSensitive(root, "password");
+    cJSON *ch_j   = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *mc_j   = cJSON_GetObjectItemCaseSensitive(root, "max_conn");
+
+    if (!cJSON_IsString(ssid_j) || !ssid_j->valuestring[0]) {
+        send_err(seq, "bad_ssid", NULL);
+        return;
+    }
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 13) {
+        send_err(seq, "bad_channel", NULL);
+        return;
+    }
+    const char *psk = cJSON_IsString(psk_j) ? psk_j->valuestring : NULL;
+    int mc = cJSON_IsNumber(mc_j) ? mc_j->valueint : 4;
+    if (mc < 1)  mc = 1;
+    if (mc > 10) mc = 10;
+
+    esp_err_t err = evil_twin_start(ssid_j->valuestring, psk,
+                                     (uint8_t)ch_j->valueint, (uint8_t)mc);
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "evil_twin_start");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "started");
+        cJSON_AddStringToObject(resp, "ssid", ssid_j->valuestring);
+        cJSON_AddNumberToObject(resp, "channel", ch_j->valueint);
+        cJSON_AddStringToObject(resp, "auth", psk && psk[0] ? "wpa2" : "open");
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "twin_busy", NULL);
+    } else if (err == ESP_ERR_INVALID_ARG) {
+        send_err(seq, "bad_args", esp_err_to_name(err));
+    } else {
+        send_err(seq, "twin_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_evil_twin_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = evil_twin_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "evil_twin_stop");
+    } else {
+        send_err(seq, "twin_idle", NULL);
+    }
+}
+
 static void handle_arp_throttle(cJSON *root)
 {
     int seq = seq_of(root);
@@ -894,6 +953,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_karma_start(root);
     } else if (strcmp(c, "karma_stop") == 0) {
         handle_karma_stop(root);
+    } else if (strcmp(c, "evil_twin_start") == 0) {
+        handle_evil_twin_start(root);
+    } else if (strcmp(c, "evil_twin_stop") == 0) {
+        handle_evil_twin_stop(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }
