@@ -93,7 +93,8 @@ ou removidos ao longo do projeto.
 
 ### Demais
 - [ ] PMKID capture
-- [ ] Probe request sniffing + dossiê de devices
+- [x] Probe request sniffing (`probe_sniff` + dedup por mac/ssid + channel hop)
+- [ ] Dossiê de devices a partir de probe history (lado app — agregação multi-sessão)
 - [ ] Evil twin / Captive portal (AP fake + DNS hijack)
 - [ ] Karma attack (responde a probes com SSIDs procurados)
 - [ ] WPS attack (Pixie Dust — viabilidade no S3 a confirmar)

@@ -14,6 +14,7 @@
 #include "hacking_wifi.h"
 #include "hacking_ble.h"
 #include "attack_lan.h"
+#include "sniff_wifi.h"
 
 static const char *TAG = "boot-diag";
 
@@ -45,6 +46,7 @@ void app_main(void)
     ESP_ERROR_CHECK(hacking_wifi_init());
     ESP_ERROR_CHECK(hacking_ble_init());
     ESP_ERROR_CHECK(attack_lan_init());
+    ESP_ERROR_CHECK(sniff_wifi_init());
 
     while (1) {
         log_mem();

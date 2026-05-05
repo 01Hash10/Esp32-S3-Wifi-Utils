@@ -115,6 +115,8 @@ Frame:
 | `arp_cut` | `seq`, `target_ip` (string IPv4), `target_mac` (string), `gateway_ip`, `gateway_mac`, `interval_ms` (100–5000, default 1000), `duration_sec` (1–600, default 60) | `{"resp":"arp_cut","seq":N,"status":"started",...}`. Roda em task assíncrona. Requer `wifi_connect` antes. Modo "drop": ESP não encaminha tráfego. | 3 |
 | `arp_cut_stop` | `seq` | `{"resp":"arp_cut_stop","seq":N,"status":"stopping"}`. | 3 |
 | `lan_scan` | `seq`, `timeout_ms` (opcional, default 3000, range 500–30000) | `{"resp":"lan_scan","seq":N,"status":"started"}` (ack imediato; hosts via TLV `LAN_HOST` em `stream`, fim via TLV `LAN_SCAN_DONE`). Requer `wifi_connect` antes. ARP scan no /24 do IP atual, ~5–8s típicos. | 3 |
+| `probe_sniff` | `seq`, `ch_min` (1–13, default 1), `ch_max` (1–13, default 13, ≥ ch_min), `dwell_ms` (100–5000, default 500), `duration_sec` (1–300, default 30) | `{"resp":"probe_sniff","seq":N,"status":"started"}` (ack imediato; cada probe único via TLV `PROBE_REQ` em `stream`, fim via `PROBE_DONE`). **Requer ESP NÃO conectado** (`wifi_disconnect` antes se preciso). Channel hopping no range, dedup por (mac, ssid) até 256 entradas. | 3 |
+| `probe_sniff_stop` | `seq` | `{"resp":"probe_sniff_stop","seq":N,"status":"started"}` (encerra cedo). | 3 |
 
 ### Erros padronizados
 
@@ -149,6 +151,10 @@ Toda resposta de erro segue o schema:
 | `cut_busy_or_offline` | Outro `arp_cut` rodando, ou ESP não conectado |
 | `cut_failed` | Falha ao iniciar a task do `arp_cut` (ex: heap baixo). `msg` traz detalhe |
 | `cut_idle` | `arp_cut_stop` chamado sem cut em andamento |
+| `wifi_busy` | `probe_sniff` solicitado enquanto ESP está conectado como STA |
+| `sniff_busy` | `probe_sniff` solicitado durante outro sniff em andamento |
+| `sniff_failed` | Falha ao iniciar a task de sniff (`msg` traz o erro) |
+| `sniff_idle` | `probe_sniff_stop` chamado sem sniff em andamento |
 
 ### Exemplos de troca
 
@@ -184,6 +190,8 @@ Toda resposta de erro segue o schema:
 | `0x13` | `BLE_SCAN_DONE` | device → app | resumo final do scan BLE | 2 |
 | `0x14` | `LAN_HOST` | device → app | 1 host (IP+MAC) descoberto pelo `lan_scan` | 3 |
 | `0x15` | `LAN_SCAN_DONE` | device → app | resumo final do `lan_scan` | 3 |
+| `0x16` | `PROBE_REQ` | device → app | 1 probe único (mac, rssi, canal, ssid pedido) | 3 |
+| `0x17` | `PROBE_DONE` | device → app | resumo final do `probe_sniff` | 3 |
 | `0x20` | `HACK_DEAUTH_DONE` | device → app | resultado final do `deauth` | 3 |
 | `0x21` | `HACK_BEACON_DONE` | device → app | resultado final do `beacon_flood` | 3 |
 | `0x22` | `HACK_BLE_SPAM_DONE` | device → app | resultado final do `ble_spam_apple` | 4 |
@@ -272,6 +280,29 @@ Toda resposta de erro segue o schema:
 > ARP request pra cada um, aguarda `timeout_ms` pra replies, e itera o
 > cache ARP do lwIP emitindo um `LAN_HOST` por entrada presente. O MAC
 > retornado é como visto pelo lwIP (geralmente o vendor/OUI real do device).
+
+### `0x16 PROBE_REQ` — payload
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `mac` | source MAC do device (BE) |
+| 6 | 1 | `rssi` | int8, dBm |
+| 7 | 1 | `channel` | canal em que o probe foi capturado |
+| 8 | 1 | `ssid_len` | uint8, 0–32 (0 = probe broadcast / wildcard) |
+| 9 | `ssid_len` | `ssid` | UTF-8, sem NUL terminador |
+
+> Probe broadcast (`ssid_len=0`) significa "device procurando qualquer AP";
+> probe direcionado revela um SSID que o device tem salvo. Fingerprint útil
+> pra montar dossiê (preferred network list / probe history).
+
+### `0x17 PROBE_DONE` — payload (9 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `unique_count` | uint16 BE, total de (mac, ssid) únicos emitidos |
+| 2 | 2 | `frames_total` | uint16 BE, probe_req frames totais vistos (inclui dups) |
+| 4 | 4 | `scan_time_ms` | uint32 BE |
+| 8 | 1 | `status` | 0 = ok, 1 = limite de 256 dedup excedido, 2 = erro |
 
 ### `0x20 HACK_DEAUTH_DONE` — payload (7 bytes)
 
@@ -415,3 +446,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3 | Comandos `wifi_connect`/`wifi_disconnect`/`arp_cut`/`arp_cut_stop`: ARP poisoning (NetCut-like) via lwip pbuf + linkoutput, modo "drop" |
 | 2026-05-05 | Phase 3/4 | `deauth`/`beacon_flood`/`ble_spam_apple` viraram **assíncronos**: ack `started` em `cmd_ctrl`, resultado final em TLVs novos (`HACK_DEAUTH_DONE 0x20`, `HACK_BEACON_DONE 0x21`, `HACK_BLE_SPAM_DONE 0x22`). Evita supervision timeout do BLE com runs longos. Novo erro `hack_busy` quando há job concorrente. |
 | 2026-05-05 | Phase 3 | Comando `lan_scan`: ARP scan no /24 do IP atual (requer `wifi_connect`). Emite TLV `LAN_HOST 0x14` por host descoberto + `LAN_SCAN_DONE 0x15` ao final. |
+| 2026-05-05 | Phase 3 | Comandos `probe_sniff` / `probe_sniff_stop`: sniffer de probe requests via WiFi promiscuous mode com channel hopping. Requer ESP não-conectado. Emite TLV `PROBE_REQ 0x16` por (mac, ssid) único + `PROBE_DONE 0x17` ao final. Erros novos: `wifi_busy`, `sniff_busy`, `sniff_failed`, `sniff_idle`. |
