@@ -130,6 +130,8 @@ Frame:
 | `pmkid_capture_stop` | `seq` | `{"resp":"pmkid_capture_stop","seq":N,"status":"started"}` (encerra cedo). | 3 |
 | `pcap_start` | `seq`, `channel` (1–13), `filter` (opcional, `"mgmt"`/`"data"`/`"ctrl"`/`"all"`/combinações `"mgmt+data"`, default `"mgmt"`), `bssid` (opcional, filtra por addr1/2/3 = bssid), `duration_sec` (opcional, 1–300, default 60) | `{"resp":"pcap_start","seq":N,"status":"started"}` (ack imediato; cada frame via TLV `PCAP_FRAME` em `stream`, fim via `PCAP_DONE`). **Requer ESP NÃO conectado**. Sem storage no ESP — frames vão direto pro app, sujeitos a rate-limit interno (~5ms entre frames). | 2 |
 | `pcap_stop` | `seq` | `{"resp":"pcap_stop","seq":N,"status":"started"}`. | 2 |
+| `karma_start` | `seq`, `channel` (1–13), `duration_sec` (opcional, 1–300, default 60) | `{"resp":"karma_start","seq":N,"status":"started"}` (ack imediato; cada (mac, ssid) único via TLV `KARMA_HIT`, fim via `KARMA_DONE`). **Requer ESP NÃO conectado**. ESP escuta probe req direcionados e responde com probe response forjado — devices que tinham o SSID na PNL podem tentar associar. | 3 |
+| `karma_stop` | `seq` | `{"resp":"karma_stop","seq":N,"status":"started"}`. | 3 |
 
 ### Erros padronizados
 
@@ -214,6 +216,8 @@ Toda resposta de erro segue o schema:
 | `0x21` | `HACK_BEACON_DONE` | device → app | resultado final do `beacon_flood` | 3 |
 | `0x22` | `HACK_BLE_SPAM_DONE` | device → app | resultado final dos `ble_spam_*` (apple/samsung/google/multi) | 4 |
 | `0x23` | `HACK_JAM_DONE` | device → app | resultado final do `channel_jam` | 3 |
+| `0x24` | `KARMA_HIT` | device → app | 1 (mac, ssid) único respondido pelo Karma | 3 |
+| `0x25` | `KARMA_DONE` | device → app | resumo final do `karma_start` | 3 |
 | `0x40` | `PCAP_FRAME` | device → app | 1 frame 802.11 capturado pelo `pcap_start`, com timestamp relativo | 2 |
 | `0x41` | `PCAP_DONE` | device → app | resumo final do `pcap_start` (emitted/dropped/elapsed) | 2 |
 
@@ -429,6 +433,29 @@ Toda resposta de erro segue o schema:
 > pela ordem dos eventos (não há `seq` do JSON original no payload TLV —
 > o `seq` do TLV é incrementado independentemente).
 
+### `0x24 KARMA_HIT` — payload
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `client_mac` | MAC do device que mandou o probe (BE) |
+| 6 | 1 | `ssid_len` | uint8, 1–32 |
+| 7 | `ssid_len` | `ssid` | UTF-8 do SSID solicitado (= um dos preferred networks do device) |
+
+> Cada `KARMA_HIT` representa um par único `(mac, ssid)` que o ESP
+> respondeu pelo menos uma vez. Probes subsequentes do mesmo par não
+> geram TLV (mas continuam sendo respondidos). Cap de 128 pares únicos
+> por sessão.
+
+### `0x25 KARMA_DONE` — payload (11 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `hits` | uint16 BE, total de probe responses enviados (incluindo dups) |
+| 2 | 2 | `unique_clients` | uint16 BE, MACs únicos vistos |
+| 4 | 2 | `unique_ssids` | uint16 BE, SSIDs únicos solicitados |
+| 6 | 4 | `elapsed_ms` | uint32 BE |
+| 10 | 1 | `status` | 0 = ok, 2 = erro (falha no promiscuous) |
+
 ### `0x40 PCAP_FRAME` — payload
 
 | Offset | Tamanho | Campo | Descrição |
@@ -579,3 +606,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 2 | `wifi_scan` ganha args opcionais `mode` (`active`/`passive`) e `channel` (0/1–13). TLV `WIFI_SCAN_AP 0x10` ganha 1 byte `flags` no final (hidden, WPS, phy_11b, phy_11n) — backward-compat (apps antigos que param em ssid não veem o byte). |
 | 2026-05-05 | Phase 2 | `ble_scan` ganha arg `mode` (`active`/`passive`). TLV `BLE_SCAN_DEV 0x12` ganha 1 byte `tracker` no final classificando AirTag/SmartTag/Tile/Chipolo — backward-compat. |
 | 2026-05-05 | Phase 2 | Comandos `pcap_start` / `pcap_stop`: streaming de frames 802.11 sem storage local. Filtros mgmt/data/ctrl + opcional BSSID. Rate-limit interno ~5ms (~200 fps). Novos TLVs `PCAP_FRAME 0x40` (ts + orig_len + flags + frame até 236B) e `PCAP_DONE 0x41` (emitted/dropped/elapsed). Faixa 0x40–0x4F (captura/dados) inaugurada. |
+| 2026-05-05 | Phase 3 | Comandos `karma_start` / `karma_stop`: Karma attack. ESP escuta probe req direcionados num canal e responde imediatamente com probe response forjado (BSSID = hash do SSID + locally-administered prefix). Novos TLVs `KARMA_HIT 0x24` (mac, ssid) único + `KARMA_DONE 0x25` (hits, unique clients, unique ssids, elapsed). |

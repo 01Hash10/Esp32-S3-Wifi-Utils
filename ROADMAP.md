@@ -96,7 +96,7 @@ ou removidos ao longo do projeto.
 - [x] Probe request sniffing (`probe_sniff` + dedup por mac/ssid + channel hop)
 - [ ] Dossiê de devices a partir de probe history (lado app — agregação multi-sessão)
 - [ ] Evil twin / Captive portal (AP fake + DNS hijack)
-- [ ] Karma attack (responde a probes com SSIDs procurados)
+- [x] Karma attack — `karma_start`: escuta probe req direcionado, responde com probe response forjado (BSSID = hash do SSID + prefix `0x02`). Útil pra mapear PNL; pra completar assoc precisa de Evil Twin.
 - [ ] WPS attack (Pixie Dust — viabilidade no S3 a confirmar)
 - [x] Channel jamming via RTS NAV-lock (`channel_jam`) — não é CW puro mas trava airtime efetivamente
 

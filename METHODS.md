@@ -37,6 +37,7 @@ firmware, explica:
 - [WPA handshake capture (`wpa_capture`)](#wpa_capture--captura-do-eapol-4-way-handshake)
 - [PMKID capture (`pmkid_capture`)](#pmkid_capture--extracao-de-pmkid-do-m1)
 - [Pcap streaming (`pcap_start`)](#pcap_start--streaming-de-frames-80211-via-ble)
+- [Karma attack (`karma_start`)](#karma_start--responde-probes-com-probe-response-forjado)
 
 ### `pcap_start` — streaming de frames 802.11 via BLE
 
@@ -125,6 +126,81 @@ App
 - Captura de deauth attacks (combinar com `deauth_detect` futuro)
 - MITM streaming (depois com `arp_cut` + filtro em data IP) — esta API
   é o substrato.
+
+---
+
+## `karma_start` — responde probes com probe response forjado
+
+**O que faz**: cliente cuja PNL (Preferred Network List) tem SSIDs salvos
+manda probe req `"FreeWifi"`/`"Starbucks"`/etc procurando re-conectar.
+ESP escuta esses probes e **responde imediatamente** com probe response
+fingindo ser um AP daquele SSID. Cliente acha que achou e tenta associar
+— foi karma'd.
+
+Original Karma attack (Cache da Hak5 Pineapple): mesmo princípio.
+
+**Como funciona** (802.11 mgmt):
+- Probe Request (subtype 0x4): cliente broadcast (addr1=ff:ff..) com
+  SSID-IE preenchido pedindo SSID específico (vs broadcast com ssid_len=0
+  pedindo "qualquer um").
+- Probe Response (subtype 0x5): AP responde com mesmo formato de Beacon
+  (timestamp + interval + capability + IEs) endereçado AO probe issuer
+  (addr1 = source do probe req).
+
+**Implementação** (`sniff_wifi.c`, modo KARMA):
+- Promisc filter MGMT.
+- promisc_cb_karma:
+  - Filtra FC byte 0 = 0x40 (probe req).
+  - Extrai source MAC + SSID IE.
+  - **Skip wildcard** (ssid_len = 0) — só responde direcionados pra evitar
+    spam.
+  - Chama `send_probe_response(client_mac, ssid, ssid_len, channel)`.
+  - Track unique (mac, ssid) em buffer estático cap 128. Se par novo,
+    emite TLV `KARMA_HIT 0x24` e incrementa unique counters.
+- send_probe_response():
+  - BSSID forjado: FNV-1a hash(ssid) + prefix `0x02` (locally administered).
+    Cada SSID tem BSSID determinístico — cliente pode até cachear.
+  - Frame Probe Response montado igual ao beacon, com FC `0x50 0x00`,
+    addr1 = client_mac.
+  - IEs: SSID + Supported Rates + DS Param + ERP + Extended Rates.
+  - `esp_wifi_80211_tx(WIFI_IF_STA, frame, len, false)`.
+- Final: TLV `KARMA_DONE 0x25` (hits, unique clients, unique ssids, elapsed).
+
+**Fluxo**:
+```
+App ──{"cmd":"karma_start","channel":6}──→ ESP
+ESP ──ack──→ App
+
+  ESP fixa ch=6, promiscuous=on
+  (cliente próximo procura "MeuWifi" da PNL)
+  Cliente ──probe req SSID="MeuWifi"──→ ar
+  ESP promisc_cb captura
+  ESP ──probe resp SSID="MeuWifi" BSSID=02:hash(...)──→ Cliente
+  ESP ──TLV[0x24] KARMA_HIT (mac, "MeuWifi")──→ App
+
+  (cliente tenta associar — auth/assoc — mas ESP não está em AP mode,
+   então a associação falha. Pra concluir o ataque seria necessário
+   evil twin ou softAP — não nesta feature.)
+
+  fim do duration_sec
+  ESP ──TLV[0x25] KARMA_DONE (hits=42, clients=3, ssids=18, ...)──→ App
+```
+
+**Limitações**:
+- ESP não está em modo AP — então mesmo respondendo o probe, a
+  associação subsequente do cliente vai falhar. Karma puro funciona
+  como **recon** (revela PNL completa de devices nearby).
+- Para concluir associação + DHCP + captive portal, combinar com
+  Evil Twin (próxima feature) que sobe softAP de verdade.
+- Probe response forjado pode bater com outros APs reais — race condition.
+- Wildcard probes ignorados pra evitar spam.
+- Cap 128 unique pairs.
+- Channel fixo (sem hop) — único canal por sessão.
+
+**Cenário de uso**:
+- Mapear preferred networks de devices nearby (privacy reveal).
+- Pré-passo pra Evil Twin: descobrir quais SSIDs spoofar.
+- Pesquisa de segurança em redes próprias.
 
 ---
 

@@ -14,6 +14,7 @@ typedef enum {
     SNIFF_MODE_EAPOL = 2,
     SNIFF_MODE_PMKID = 3,
     SNIFF_MODE_PCAP  = 4,
+    SNIFF_MODE_KARMA = 5,
 } sniff_mode_t;
 
 // Bitmask para filtro do pcap_start.
@@ -72,6 +73,20 @@ esp_err_t sniff_wifi_pcap_start(uint8_t channel, uint8_t filter,
                                  uint16_t duration_sec);
 
 esp_err_t sniff_wifi_pcap_stop(void);
+
+// Karma attack: escuta probe requests direcionados (ssid_len > 0) num
+// canal fixo e responde imediatamente com probe response forjado. Devices
+// que tinham o SSID na PNL (preferred network list) acreditam que o AP
+// está disponível e podem tentar associar. Emite TLV KARMA_HIT por
+// (mac, ssid) único + KARMA_DONE no final.
+//
+// Pré-requisito: ESP NÃO conectado como STA.
+//
+// @param channel canal fixo (1–13)
+// @param duration_sec 1..300, default 60
+esp_err_t sniff_wifi_karma_start(uint8_t channel, uint16_t duration_sec);
+
+esp_err_t sniff_wifi_karma_stop(void);
 
 bool sniff_wifi_busy(void);
 sniff_mode_t sniff_wifi_mode(void);

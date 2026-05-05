@@ -495,6 +495,47 @@ static void handle_pcap_stop(cJSON *root)
     }
 }
 
+static void handle_karma_start(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (attack_lan_is_connected()) {
+        send_err(seq, "wifi_busy", "disconnect first");
+        return;
+    }
+
+    cJSON *ch_j  = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *dur_j = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 13) {
+        send_err(seq, "bad_channel", NULL);
+        return;
+    }
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 60;
+    if (dur < 1)   dur = 1;
+    if (dur > 300) dur = 300;
+
+    esp_err_t err = sniff_wifi_karma_start((uint8_t)ch_j->valueint,
+                                            (uint16_t)dur);
+    if (err == ESP_OK) {
+        send_ack(seq, "karma_start");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "sniff_busy", NULL);
+    } else {
+        send_err(seq, "sniff_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_karma_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = sniff_wifi_karma_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "karma_stop");
+    } else {
+        send_err(seq, "sniff_idle", NULL);
+    }
+}
+
 static void handle_arp_throttle(cJSON *root)
 {
     int seq = seq_of(root);
@@ -849,6 +890,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_pcap_start(root);
     } else if (strcmp(c, "pcap_stop") == 0) {
         handle_pcap_stop(root);
+    } else if (strcmp(c, "karma_start") == 0) {
+        handle_karma_start(root);
+    } else if (strcmp(c, "karma_stop") == 0) {
+        handle_karma_stop(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }

