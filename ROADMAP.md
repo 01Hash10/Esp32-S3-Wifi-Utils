@@ -85,6 +85,12 @@ ou removidos ao longo do projeto.
   - Ajustar IEs (HT/VHT capabilities) se filtros do scanner exigirem.
 - [ ] WPA handshake capture (EAPOL 4-way) → exporta pcap
 
+### LAN-level (atacante associado à rede)
+- [x] WiFi STA connect/disconnect (`wifi_connect`/`wifi_disconnect`)
+- [x] ARP poisoning / NetCut — modo "drop" (`arp_cut` / `arp_cut_stop`)
+- [ ] ARP poisoning — modo "throttle" (forwarding com rate limit)
+- [ ] LAN host discovery (ping sweep / ARP scan)
+
 ### Demais
 - [ ] Deauth broadcast (kick all clients de um BSSID)
 - [~] Beacon flood — lista custom de SSIDs (do app) — feito acima, validação pendente

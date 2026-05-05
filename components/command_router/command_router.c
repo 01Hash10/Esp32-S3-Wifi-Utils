@@ -4,6 +4,7 @@
 #include "scan_ble.h"
 #include "hacking_wifi.h"
 #include "hacking_ble.h"
+#include "attack_lan.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -125,6 +126,129 @@ static int parse_mac(const char *s, uint8_t out[6])
     }
     for (int i = 0; i < 6; i++) out[i] = (uint8_t)(b[i] & 0xFF);
     return 0;
+}
+
+static int parse_ipv4(const char *s, uint8_t out[4])
+{
+    if (!s) return -1;
+    unsigned b[4];
+    if (sscanf(s, "%u.%u.%u.%u", &b[0], &b[1], &b[2], &b[3]) != 4) return -1;
+    for (int i = 0; i < 4; i++) {
+        if (b[i] > 255) return -1;
+        out[i] = (uint8_t)b[i];
+    }
+    return 0;
+}
+
+static void handle_wifi_connect(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *ssid_j = cJSON_GetObjectItemCaseSensitive(root, "ssid");
+    cJSON *psk_j  = cJSON_GetObjectItemCaseSensitive(root, "password");
+    cJSON *to_j   = cJSON_GetObjectItemCaseSensitive(root, "timeout_ms");
+
+    if (!cJSON_IsString(ssid_j) || !ssid_j->valuestring[0]) {
+        send_err(seq, "bad_ssid", NULL);
+        return;
+    }
+    const char *psk = cJSON_IsString(psk_j) ? psk_j->valuestring : NULL;
+    uint16_t to = cJSON_IsNumber(to_j) ? (uint16_t)to_j->valueint : 15000;
+
+    uint8_t ip[4], gw[4], mac[6];
+    esp_err_t err = attack_lan_wifi_connect(ssid_j->valuestring, psk, to, ip, gw, mac);
+    if (err == ESP_OK) {
+        char ip_s[16], gw_s[16], mac_s[18];
+        snprintf(ip_s, sizeof(ip_s), "%u.%u.%u.%u", ip[0],ip[1],ip[2],ip[3]);
+        snprintf(gw_s, sizeof(gw_s), "%u.%u.%u.%u", gw[0],gw[1],gw[2],gw[3]);
+        snprintf(mac_s, sizeof(mac_s), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "wifi_connect");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "connected");
+        cJSON_AddStringToObject(resp, "ip", ip_s);
+        cJSON_AddStringToObject(resp, "gateway", gw_s);
+        cJSON_AddStringToObject(resp, "mac", mac_s);
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else if (err == ESP_ERR_TIMEOUT) {
+        send_err(seq, "wifi_timeout", NULL);
+    } else {
+        send_err(seq, "wifi_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_wifi_disconnect(cJSON *root)
+{
+    int seq = seq_of(root);
+    attack_lan_wifi_disconnect();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "resp", "wifi_disconnect");
+    cJSON_AddNumberToObject(resp, "seq", seq);
+    cJSON_AddStringToObject(resp, "status", "disconnected");
+    send_json(resp);
+    cJSON_Delete(resp);
+}
+
+static void handle_arp_cut(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (!attack_lan_is_connected()) {
+        send_err(seq, "wifi_not_connected", NULL);
+        return;
+    }
+
+    cJSON *t_ip_j   = cJSON_GetObjectItemCaseSensitive(root, "target_ip");
+    cJSON *t_mac_j  = cJSON_GetObjectItemCaseSensitive(root, "target_mac");
+    cJSON *gw_ip_j  = cJSON_GetObjectItemCaseSensitive(root, "gateway_ip");
+    cJSON *gw_mac_j = cJSON_GetObjectItemCaseSensitive(root, "gateway_mac");
+    cJSON *iv_j     = cJSON_GetObjectItemCaseSensitive(root, "interval_ms");
+    cJSON *dur_j    = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+
+    uint8_t t_ip[4], t_mac[6], gw_ip[4], gw_mac[6];
+    if (!cJSON_IsString(t_ip_j)   || parse_ipv4(t_ip_j->valuestring, t_ip)   != 0)
+        { send_err(seq, "bad_target_ip", NULL); return; }
+    if (!cJSON_IsString(t_mac_j)  || parse_mac(t_mac_j->valuestring, t_mac)  != 0)
+        { send_err(seq, "bad_target_mac", NULL); return; }
+    if (!cJSON_IsString(gw_ip_j)  || parse_ipv4(gw_ip_j->valuestring, gw_ip) != 0)
+        { send_err(seq, "bad_gateway_ip", NULL); return; }
+    if (!cJSON_IsString(gw_mac_j) || parse_mac(gw_mac_j->valuestring, gw_mac)!= 0)
+        { send_err(seq, "bad_gateway_mac", NULL); return; }
+
+    uint16_t iv = cJSON_IsNumber(iv_j) ? (uint16_t)iv_j->valueint : 1000;
+    uint16_t dur = cJSON_IsNumber(dur_j) ? (uint16_t)dur_j->valueint : 60;
+
+    esp_err_t err = attack_lan_arp_cut_start(t_ip, t_mac, gw_ip, gw_mac, iv, dur);
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "arp_cut");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "started");
+        cJSON_AddNumberToObject(resp, "interval_ms", iv);
+        cJSON_AddNumberToObject(resp, "duration_sec", dur);
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "cut_busy_or_offline", NULL);
+    } else {
+        send_err(seq, "cut_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_arp_cut_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = attack_lan_arp_cut_stop();
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "arp_cut_stop");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "stopping");
+        send_json(resp);
+        cJSON_Delete(resp);
+    } else {
+        send_err(seq, "cut_idle", NULL);
+    }
 }
 
 static void handle_deauth(cJSON *root)
@@ -321,6 +445,14 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_beacon_flood(root);
     } else if (strcmp(c, "ble_spam_apple") == 0) {
         handle_ble_spam_apple(root);
+    } else if (strcmp(c, "wifi_connect") == 0) {
+        handle_wifi_connect(root);
+    } else if (strcmp(c, "wifi_disconnect") == 0) {
+        handle_wifi_disconnect(root);
+    } else if (strcmp(c, "arp_cut") == 0) {
+        handle_arp_cut(root);
+    } else if (strcmp(c, "arp_cut_stop") == 0) {
+        handle_arp_cut_stop(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }
@@ -330,6 +462,8 @@ void command_router_handle_json(const uint8_t *data, size_t len)
 
 esp_err_t command_router_init(void)
 {
-    ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan, ble_scan, ble_scan_stop, deauth, beacon_flood, ble_spam_apple)");
+    ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan, ble_scan, ble_scan_stop,"
+                  " deauth, beacon_flood, ble_spam_apple, wifi_connect, wifi_disconnect,"
+                  " arp_cut, arp_cut_stop)");
     return ESP_OK;
 }
