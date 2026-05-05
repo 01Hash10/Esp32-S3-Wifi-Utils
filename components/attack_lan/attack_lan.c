@@ -61,6 +61,11 @@ typedef struct {
 static arp_throttle_ctx_t s_thr = { .stop = true };
 static TaskHandle_t s_thr_task = NULL;
 
+// Forward declaration: usada nos checks de exclusão mútua dos
+// arp_cut_start / arp_throttle_start (a definição vem depois junto
+// com a implementação do lan_scan).
+static volatile bool s_lan_busy;
+
 static void wifi_event_handler(void *arg, esp_event_base_t base,
                                 int32_t id, void *data)
 {
@@ -235,6 +240,8 @@ esp_err_t attack_lan_arp_cut_start(const uint8_t target_ip[4],
 {
     if (!s_connected) return ESP_ERR_INVALID_STATE;
     if (!s_cut.stop)  return ESP_ERR_INVALID_STATE;
+    if (!s_thr.stop)  return ESP_ERR_INVALID_STATE; // throttle ativo
+    if (s_lan_busy)   return ESP_ERR_INVALID_STATE; // lan_scan ativo
     if (interval_ms < 100) interval_ms = 100;
     if (interval_ms > 5000) interval_ms = 5000;
     if (duration_sec == 0 || duration_sec > 600) duration_sec = 60;
@@ -340,6 +347,7 @@ esp_err_t attack_lan_arp_throttle_start(const uint8_t target_ip[4],
     if (!s_connected) return ESP_ERR_INVALID_STATE;
     if (!s_cut.stop)  return ESP_ERR_INVALID_STATE; // cut em andamento
     if (!s_thr.stop)  return ESP_ERR_INVALID_STATE; // throttle em andamento
+    if (s_lan_busy)   return ESP_ERR_INVALID_STATE; // lan_scan em andamento
     if (on_ms < 200)   on_ms = 200;
     if (on_ms > 60000) on_ms = 60000;
     if (off_ms < 200)  off_ms = 200;
@@ -383,7 +391,7 @@ typedef struct {
     uint16_t timeout_ms;
 } lan_scan_ctx_t;
 
-static volatile bool s_lan_busy = false;
+static volatile bool s_lan_busy = false; // definição (forward-declared acima)
 static TaskHandle_t s_lan_task = NULL;
 static uint8_t s_lan_seq = 0;
 
@@ -483,6 +491,10 @@ esp_err_t attack_lan_lan_scan_start(uint16_t timeout_ms)
 {
     if (!s_connected) return ESP_ERR_INVALID_STATE;
     if (s_lan_busy)   return ESP_ERR_INVALID_STATE;
+    // arp_cut/throttle ativos poluem o ARP cache do lwIP — lan_scan
+    // popula a partir dele, então rodar junto = resultados corrompidos.
+    if (!s_cut.stop)  return ESP_ERR_INVALID_STATE;
+    if (!s_thr.stop)  return ESP_ERR_INVALID_STATE;
 
     if (timeout_ms < 500)   timeout_ms = 500;
     if (timeout_ms > 30000) timeout_ms = 30000;

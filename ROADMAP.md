@@ -100,6 +100,52 @@ ou removidos ao longo do projeto.
 - [ ] WPS attack (Pixie Dust — viabilidade no S3 a confirmar)
 - [x] Channel jamming via RTS NAV-lock (`channel_jam`) — não é CW puro mas trava airtime efetivamente
 
+## Phase 3.5 — Comandos compostos & Playbook
+
+> **Por quê esta fase**: várias features só fazem sentido combinadas
+> (ex: `wpa_capture` + `deauth`, `evil_twin` + `karma` + `deauth`).
+> Hoje o app/script encadeia manualmente. Aqui formalizamos: macros
+> hardcoded pras combinações comuns + playbook engine pra workflows
+> complexos. Ver `COMPOSITION.md` pra catálogo completo + matriz de
+> compatibilidade entre componentes.
+
+### Macros (firmware-side, comandos compostos hardcoded)
+
+- [ ] `wpa_capture_kick` — `deauth(broadcast, count=30)` + `wpa_capture`
+  no mesmo BSSID/canal. Caso de uso: cracking WPA convencional.
+- [ ] `pmkid_capture_kick` — análogo: `deauth` + `pmkid_capture`.
+  Caso de uso: PMKID-only attack se AP não suportar Offline Finding KDE
+  na primeira tentativa.
+- [ ] `evil_twin_kick` — `evil_twin_start(ssid)` + `deauth(legit_bssid)`
+  paralelo. Caso de uso: forçar clients a migrar do AP legítimo pro twin.
+- [ ] `karma_then_twin` — `karma_start` por N segundos, escolhe o SSID
+  mais probed, **automaticamente** sobe `evil_twin` com aquele SSID.
+  Mini-playbook embutido.
+- [ ] `recon_full` — `wifi_scan(passive, all)` + `ble_scan(active)`
+  paralelos + (se `wifi_connect` ativo) `lan_scan`. Snapshot completo
+  do entorno em 1 comando.
+- [ ] `deauth_storm` — `deauth(bssid, count=200)` + `channel_jam` no
+  mesmo canal. DoS combinado: kicka clients e impede reconexão.
+- [ ] `mitm_capture` — `arp_cut(target)` modo throttle + `pcap_start`
+  no canal do AP filtrando por target_mac. Captura tráfego HTTP do
+  alvo enquanto o cut estrangula a banda. (Depende de forwarding mode
+  futuro do arp_cut pra realmente passar dados.)
+- [ ] `tracker_hunt` — `ble_scan(active)` por N segundos, agrega devices
+  com flag `tracker` no `BLE_SCAN_DEV` payload, emite alerta TLV se
+  algum device persistir entre múltiplos scans (= seguindo você).
+  Lado-app pode fazer; mas embutir no firmware permite operação 24/7
+  sem app conectado.
+
+### Playbook engine (médio prazo)
+
+- [ ] Comando `playbook_run`: aceita JSON com array de steps + condicionais
+- [ ] Step types: `cmd` (executa comando interno), `wait_ms`, `wait_event`
+  (TLV específico com filtros), `if`, `select_top` (pega top-N de uma
+  lista de TLVs por contagem), `loop`
+- [ ] Output: TLV `PLAYBOOK_STEP_DONE 0x28` por step + `PLAYBOOK_DONE 0x29`
+- [ ] Persistência opcional: `playbook_save` em NVS (vinculado à Phase 7)
+- [ ] Watchdog: rate-limit, timeout total, abort em N erros consecutivos
+
 ## Phase 4 — Hacking BLE
 
 - [x] BLE spam — Apple Continuity (popup AirPods/etc) — TX validado (100/100

@@ -93,6 +93,14 @@ Usar `monitor.sh` (pyserial direto).
   O que faz / Como funciona / Implementação / Fluxo / Limitações.
   Sem entrada lá ↔ feature incompleta.
 
+- **Composição & orquestração**: `COMPOSITION.md` documenta combinações
+  entre features, matriz de compatibilidade (o que roda em paralelo) e
+  o catálogo de macros / playbook da Phase 3.5.
+
+  **Regra obrigatória**: toda macro nova ou mudança em exclusão
+  mútua entre componentes (`s_busy`, `s_mode`, etc) **DEVE** atualizar
+  `COMPOSITION.md` no mesmo commit.
+
 ## Convenções
 
 - Sem comentários narrativos no código (manter `main.c` enxuto).
