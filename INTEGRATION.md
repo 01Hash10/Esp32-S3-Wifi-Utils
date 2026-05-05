@@ -114,6 +114,7 @@ Frame:
 | `wifi_disconnect` | `seq` | `{"resp":"wifi_disconnect","seq":N,"status":"disconnected"}`. Para qualquer `arp_cut` ativo também. | 3 |
 | `arp_cut` | `seq`, `target_ip` (string IPv4), `target_mac` (string), `gateway_ip`, `gateway_mac`, `interval_ms` (100–5000, default 1000), `duration_sec` (1–600, default 60) | `{"resp":"arp_cut","seq":N,"status":"started",...}`. Roda em task assíncrona. Requer `wifi_connect` antes. Modo "drop": ESP não encaminha tráfego. | 3 |
 | `arp_cut_stop` | `seq` | `{"resp":"arp_cut_stop","seq":N,"status":"stopping"}`. | 3 |
+| `lan_scan` | `seq`, `timeout_ms` (opcional, default 3000, range 500–30000) | `{"resp":"lan_scan","seq":N,"status":"started"}` (ack imediato; hosts via TLV `LAN_HOST` em `stream`, fim via TLV `LAN_SCAN_DONE`). Requer `wifi_connect` antes. ARP scan no /24 do IP atual, ~5–8s típicos. | 3 |
 
 ### Erros padronizados
 
@@ -181,6 +182,8 @@ Toda resposta de erro segue o schema:
 | `0x11` | `WIFI_SCAN_DONE` | device → app | resumo final do scan | 2 |
 | `0x12` | `BLE_SCAN_DEV` | device → app | 1 device por frame (dedup por MAC) | 2 |
 | `0x13` | `BLE_SCAN_DONE` | device → app | resumo final do scan BLE | 2 |
+| `0x14` | `LAN_HOST` | device → app | 1 host (IP+MAC) descoberto pelo `lan_scan` | 3 |
+| `0x15` | `LAN_SCAN_DONE` | device → app | resumo final do `lan_scan` | 3 |
 | `0x20` | `HACK_DEAUTH_DONE` | device → app | resultado final do `deauth` | 3 |
 | `0x21` | `HACK_BEACON_DONE` | device → app | resultado final do `beacon_flood` | 3 |
 | `0x22` | `HACK_BLE_SPAM_DONE` | device → app | resultado final do `ble_spam_apple` | 4 |
@@ -249,6 +252,26 @@ Toda resposta de erro segue o schema:
 > recebe N frames `WIFI_SCAN_AP` em `stream` (um por AP) → recebe
 > `WIFI_SCAN_DONE` indicando fim. Os `seq` do TLV são incrementais por
 > characteristic (independente do `seq` do JSON em `cmd_ctrl`).
+
+### `0x14 LAN_HOST` — payload (10 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 4 | `ip` | IPv4 do host (BE, ex: `c0 a8 01 32` = 192.168.1.50) |
+| 4 | 6 | `mac` | MAC do host (BE) |
+
+### `0x15 LAN_SCAN_DONE` — payload (7 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `host_count` | uint16 BE, total de hosts descobertos |
+| 2 | 4 | `scan_time_ms` | uint32 BE, duração total |
+| 6 | 1 | `status` | 0 = ok, 2 = erro (sem netif default) |
+
+> O firmware varre 1..254 do /24 do IP atual (excluindo o ESP), envia
+> ARP request pra cada um, aguarda `timeout_ms` pra replies, e itera o
+> cache ARP do lwIP emitindo um `LAN_HOST` por entrada presente. O MAC
+> retornado é como visto pelo lwIP (geralmente o vendor/OUI real do device).
 
 ### `0x20 HACK_DEAUTH_DONE` — payload (7 bytes)
 
@@ -391,3 +414,4 @@ Future<void> connectAndPing() async {
 | 2026-05-04 | Phase 4 | Comando `ble_spam_apple`: spam de Apple Continuity Proximity Pairing (subtype 0x07), 5 modelos (AirPods/Pro/Max/Beats/Pro2), random MAC por cycle |
 | 2026-05-05 | Phase 3 | Comandos `wifi_connect`/`wifi_disconnect`/`arp_cut`/`arp_cut_stop`: ARP poisoning (NetCut-like) via lwip pbuf + linkoutput, modo "drop" |
 | 2026-05-05 | Phase 3/4 | `deauth`/`beacon_flood`/`ble_spam_apple` viraram **assíncronos**: ack `started` em `cmd_ctrl`, resultado final em TLVs novos (`HACK_DEAUTH_DONE 0x20`, `HACK_BEACON_DONE 0x21`, `HACK_BLE_SPAM_DONE 0x22`). Evita supervision timeout do BLE com runs longos. Novo erro `hack_busy` quando há job concorrente. |
+| 2026-05-05 | Phase 3 | Comando `lan_scan`: ARP scan no /24 do IP atual (requer `wifi_connect`). Emite TLV `LAN_HOST 0x14` por host descoberto + `LAN_SCAN_DONE 0x15` ao final. |

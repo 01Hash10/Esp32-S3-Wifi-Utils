@@ -35,3 +35,16 @@ esp_err_t attack_lan_arp_cut_start(const uint8_t target_ip[4],
                                    uint16_t duration_sec);
 
 esp_err_t attack_lan_arp_cut_stop(void);
+
+// LAN host discovery (ARP scan no /24 do IP atual). Dispara um ARP request
+// pra cada IP de 1..254 (excluindo o ESP), aguarda `timeout_ms` pra replies
+// populares o cache do lwIP, e emite TLV_MSG_LAN_HOST por host encontrado +
+// TLV_MSG_LAN_SCAN_DONE ao final.
+//
+// Async (FreeRTOS task).
+//
+// @param timeout_ms 500–30000, default 3000.
+// @return ESP_ERR_INVALID_STATE se já há lan_scan rodando, ou WiFi offline.
+esp_err_t attack_lan_lan_scan_start(uint16_t timeout_ms);
+
+bool attack_lan_lan_scan_busy(void);

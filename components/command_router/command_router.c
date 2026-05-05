@@ -254,6 +254,28 @@ static void handle_arp_cut_stop(cJSON *root)
     }
 }
 
+static void handle_lan_scan(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (!attack_lan_is_connected()) {
+        send_err(seq, "wifi_not_connected", NULL);
+        return;
+    }
+    cJSON *to_j = cJSON_GetObjectItemCaseSensitive(root, "timeout_ms");
+    int to_raw = cJSON_IsNumber(to_j) ? to_j->valueint : 3000;
+    if (to_raw < 500)   to_raw = 500;
+    if (to_raw > 30000) to_raw = 30000;
+
+    esp_err_t err = attack_lan_lan_scan_start((uint16_t)to_raw);
+    if (err == ESP_OK) {
+        send_ack(seq, "lan_scan");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "scan_busy", NULL);
+    } else {
+        send_err(seq, "scan_failed", esp_err_to_name(err));
+    }
+}
+
 static void handle_deauth(cJSON *root)
 {
     int seq = seq_of(root);
@@ -431,6 +453,8 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_arp_cut(root);
     } else if (strcmp(c, "arp_cut_stop") == 0) {
         handle_arp_cut_stop(root);
+    } else if (strcmp(c, "lan_scan") == 0) {
+        handle_lan_scan(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }
@@ -442,6 +466,6 @@ esp_err_t command_router_init(void)
 {
     ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan, ble_scan, ble_scan_stop,"
                   " deauth, beacon_flood, ble_spam_apple, wifi_connect, wifi_disconnect,"
-                  " arp_cut, arp_cut_stop)");
+                  " arp_cut, arp_cut_stop, lan_scan)");
     return ESP_OK;
 }

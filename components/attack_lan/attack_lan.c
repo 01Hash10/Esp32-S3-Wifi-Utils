@@ -1,5 +1,8 @@
 #include "attack_lan.h"
+#include "tlv.h"
+#include "transport_ble.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -15,6 +18,8 @@
 
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
+#include "lwip/etharp.h"
+#include "lwip/ip4_addr.h"
 
 static const char *TAG = "attack-lan";
 
@@ -245,6 +250,140 @@ esp_err_t attack_lan_arp_cut_stop(void)
 {
     if (s_cut.stop) return ESP_ERR_INVALID_STATE;
     s_cut.stop = true;
+    return ESP_OK;
+}
+
+// ----------------------------------------------------------------------
+// LAN host discovery (ARP scan)
+// ----------------------------------------------------------------------
+
+typedef struct {
+    uint8_t prefix[3];     // primeiros 3 octetos do /24
+    uint8_t my_last;       // último octeto nosso (excluído do scan)
+    uint16_t timeout_ms;
+} lan_scan_ctx_t;
+
+static volatile bool s_lan_busy = false;
+static TaskHandle_t s_lan_task = NULL;
+static uint8_t s_lan_seq = 0;
+
+bool attack_lan_lan_scan_busy(void)
+{
+    return s_lan_busy;
+}
+
+static void emit_lan_host(const uint8_t ip[4], const uint8_t mac[6])
+{
+    uint8_t payload[10];
+    memcpy(&payload[0], ip,  4);
+    memcpy(&payload[4], mac, 6);
+
+    uint8_t frame[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(frame, sizeof(frame),
+                           TLV_MSG_LAN_HOST, s_lan_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(frame, (size_t)total);
+}
+
+static void emit_lan_done(uint16_t host_count, uint32_t scan_ms, uint8_t status)
+{
+    uint8_t payload[7];
+    payload[0] = (uint8_t)(host_count >> 8);
+    payload[1] = (uint8_t)(host_count & 0xFF);
+    payload[2] = (uint8_t)(scan_ms >> 24);
+    payload[3] = (uint8_t)(scan_ms >> 16);
+    payload[4] = (uint8_t)(scan_ms >> 8);
+    payload[5] = (uint8_t)(scan_ms & 0xFF);
+    payload[6] = status;
+
+    uint8_t frame[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(frame, sizeof(frame),
+                           TLV_MSG_LAN_SCAN_DONE, s_lan_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(frame, (size_t)total);
+}
+
+static void lan_scan_task(void *arg)
+{
+    lan_scan_ctx_t *ctx = (lan_scan_ctx_t *)arg;
+    int64_t start_us = esp_timer_get_time();
+
+    struct netif *netif = netif_default;
+    if (!netif) {
+        ESP_LOGE(TAG, "lan_scan: no default netif");
+        emit_lan_done(0, 0, 2);
+        goto cleanup;
+    }
+
+    // Fase 1: dispara ARP request pra cada IP do /24 (exceto o nosso)
+    for (uint16_t i = 1; i <= 254 && s_lan_busy; i++) {
+        if (i == ctx->my_last) continue;
+        ip4_addr_t target;
+        IP4_ADDR(&target, ctx->prefix[0], ctx->prefix[1],
+                 ctx->prefix[2], (uint8_t)i);
+        etharp_request(netif, &target);
+        vTaskDelay(pdMS_TO_TICKS(15));
+    }
+
+    // Fase 2: aguarda replies popularem o cache
+    vTaskDelay(pdMS_TO_TICKS(ctx->timeout_ms));
+
+    // Fase 3: itera o /24 consultando o ARP cache do lwIP
+    uint16_t found = 0;
+    for (uint16_t i = 1; i <= 254; i++) {
+        if (i == ctx->my_last) continue;
+        ip4_addr_t target;
+        IP4_ADDR(&target, ctx->prefix[0], ctx->prefix[1],
+                 ctx->prefix[2], (uint8_t)i);
+        struct eth_addr *eth_ret = NULL;
+        const ip4_addr_t *ip_ret = NULL;
+        ssize_t idx = etharp_find_addr(netif, &target, &eth_ret, &ip_ret);
+        if (idx >= 0 && eth_ret) {
+            uint8_t ip_bytes[4] = {
+                ctx->prefix[0], ctx->prefix[1], ctx->prefix[2], (uint8_t)i
+            };
+            emit_lan_host(ip_bytes, eth_ret->addr);
+            found++;
+        }
+    }
+
+    uint32_t elapsed = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+    emit_lan_done(found, elapsed, 0);
+    ESP_LOGI(TAG, "lan_scan done: %u hosts in %u ms",
+             (unsigned)found, (unsigned)elapsed);
+
+cleanup:
+    free(ctx);
+    s_lan_task = NULL;
+    s_lan_busy = false;
+    vTaskDelete(NULL);
+}
+
+esp_err_t attack_lan_lan_scan_start(uint16_t timeout_ms)
+{
+    if (!s_connected) return ESP_ERR_INVALID_STATE;
+    if (s_lan_busy)   return ESP_ERR_INVALID_STATE;
+
+    if (timeout_ms < 500)   timeout_ms = 500;
+    if (timeout_ms > 30000) timeout_ms = 30000;
+
+    lan_scan_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return ESP_ERR_NO_MEM;
+    ctx->prefix[0]  = s_my_ip[0];
+    ctx->prefix[1]  = s_my_ip[1];
+    ctx->prefix[2]  = s_my_ip[2];
+    ctx->my_last    = s_my_ip[3];
+    ctx->timeout_ms = timeout_ms;
+
+    s_lan_busy = true;
+    if (xTaskCreate(lan_scan_task, "lan_scan", 4096, ctx, 5, &s_lan_task) != pdPASS) {
+        free(ctx);
+        s_lan_busy = false;
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "lan_scan started: %u.%u.%u.0/24 (skip .%u), timeout=%ums",
+             ctx->prefix[0], ctx->prefix[1], ctx->prefix[2],
+             ctx->my_last, (unsigned)timeout_ms);
     return ESP_OK;
 }
 

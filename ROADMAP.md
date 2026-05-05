@@ -89,7 +89,7 @@ ou removidos ao longo do projeto.
 - [x] WiFi STA connect/disconnect (`wifi_connect`/`wifi_disconnect`)
 - [x] ARP poisoning / NetCut — modo "drop" (`arp_cut` / `arp_cut_stop`)
 - [ ] ARP poisoning — modo "throttle" (forwarding com rate limit)
-- [ ] LAN host discovery (ping sweep / ARP scan)
+- [x] LAN host discovery — ARP scan no /24 (`lan_scan`)
 
 ### Demais
 - [ ] PMKID capture
