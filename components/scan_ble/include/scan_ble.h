@@ -1,6 +1,5 @@
 #pragma once
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
@@ -28,12 +27,6 @@ esp_err_t scan_ble_start_ex(scan_ble_mode_t mode, uint16_t duration_sec);
 esp_err_t scan_ble_start(uint16_t duration_sec);
 
 esp_err_t scan_ble_stop(void);
-
-// Indica se há scan BLE rodando (qualquer modo).
-bool scan_ble_busy(void);
-
-// Indica se está rodando o defense mode (vs scan normal).
-bool scan_ble_in_defense_mode(void);
 
 // BLE spam detector: roda scan passivo contínuo, classifica advs por
 // assinatura vendor (Apple Continuity / Samsung EasySetup / Google Fast Pair)

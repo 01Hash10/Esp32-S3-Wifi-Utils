@@ -20,7 +20,6 @@
 #include "watchdog.h"
 #include "persist.h"
 #include "playbook.h"
-#include "status_led.h"
 
 static const char *TAG = "boot-diag";
 
@@ -58,7 +57,6 @@ void app_main(void)
     ESP_ERROR_CHECK(watchdog_init());
     ESP_ERROR_CHECK(persist_init());
     ESP_ERROR_CHECK(playbook_init());
-    ESP_ERROR_CHECK(status_led_init());
 
     while (1) {
         log_mem();

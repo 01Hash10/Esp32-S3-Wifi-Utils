@@ -426,13 +426,3 @@ esp_err_t scan_ble_defense_stop(void)
     s_defense_stop_requested = true;
     return ESP_OK;
 }
-
-bool scan_ble_busy(void)
-{
-    return s_busy;
-}
-
-bool scan_ble_in_defense_mode(void)
-{
-    return s_defense_mode;
-}

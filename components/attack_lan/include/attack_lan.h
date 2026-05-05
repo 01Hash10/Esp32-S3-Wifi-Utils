@@ -55,10 +55,6 @@ esp_err_t attack_lan_arp_throttle_start(const uint8_t target_ip[4],
 
 esp_err_t attack_lan_arp_throttle_stop(void);
 
-// Indicadores pra status_led / outros
-bool attack_lan_arp_cut_busy(void);
-bool attack_lan_arp_throttle_busy(void);
-
 // LAN host discovery (ARP scan no /24 do IP atual). Dispara um ARP request
 // pra cada IP de 1..254 (excluindo o ESP), aguarda `timeout_ms` pra replies
 // populares o cache do lwIP, e emite TLV_MSG_LAN_HOST por host encontrado +
