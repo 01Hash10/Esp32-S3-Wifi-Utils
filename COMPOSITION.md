@@ -122,18 +122,21 @@ associam.
 ausente, só sobe twin sem deauth), `deauth_count` (5–200, default 30).
 Resposta inclui `kick_fired` (bool) indicando se o deauth foi disparado.
 
-### `karma_then_twin`
+### `karma_then_twin` ✅ implementado em 2026-05-05
 
 **Mini-playbook embutido** (não é macro simples, tem decisão):
 
-1. `karma_start(channel, duration_sec=30)` por 30s.
-2. Aggrega `KARMA_HIT`s por SSID, conta hits.
-3. Pega o top-1 SSID (mais probed).
-4. `evil_twin_start(top_ssid, channel)`.
-5. Mantém ativo até `karma_then_twin_stop` ou timeout absoluto.
+1. `sniff_wifi_karma_start(channel, duration_sec)` por N segundos.
+2. Agrega `KARMA_HIT`s por SSID via hook **weak** `macros_hook_karma_hit`
+   declarado em sniff_wifi.c, override forte no command_router.c.
+3. Após duration + 500ms folga, escolhe o top-1 SSID (mais probed).
+4. `evil_twin_start(top_ssid, optional_password, channel, max_conn=4)`.
+5. Resposta final assíncrona: `{"status":"twin_up","ssid":"X","hits":N}`,
+   `{"status":"no_hits"}` ou `{"status":"twin_failed","err":"..."}`.
 
 Útil pra "automode": liga em ambiente desconhecido, ESP descobre o que
-todo mundo procura, e oferece ele mesmo como AP.
+todo mundo procura, e oferece ele mesmo como AP. Args: `channel`,
+`duration_sec` (5–120, default 30), `password` (opcional WPA2).
 
 ### `recon_full` ✅ implementado em 2026-05-05
 
@@ -145,33 +148,60 @@ seus TLVs normais (`WIFI_SCAN_AP/DONE`, `BLE_SCAN_DEV/DONE`,
 `LAN_HOST/DONE`). Resposta JSON tem 3 booleans indicando quais scans
 iniciaram OK. Sem TLV próprio do macro — desejável agregar lado-app.
 
-### `deauth_storm`
+### `deauth_storm` ✅ implementado em 2026-05-05
 
-**O que combina**: `deauth(bssid, count=200)` + `channel_jam(channel, 30s)`
+**O que combina**: burst inicial de `deauth_count` deauths + loop alternando 30 RTS jam + 5 deauths até `jam_seconds`.
 
-Aggressive DoS: kicka clients **e** impede reconexão por 30s. Só usar
-em redes próprias.
+Implementação: nova função `hacking_wifi_deauth_storm()` que roda numa
+**task única** alternando deauth e RTS — evita race em set_channel e
+conflito do s_busy global do hacking_wifi (deauth e channel_jam são
+mutex; storm é um job próprio).
 
-### `mitm_capture` (depende de Phase 3 throttle "real")
+Args: `bssid`, `target` (opcional, default broadcast), `channel` (1–14),
+`deauth_count` (10–500, default 50), `jam_seconds` (5–60, default 15).
 
-**O que combina**: `arp_cut(target, throttle modo forwarding)` + `pcap_start(channel, filter=data, target_mac=...)`
+Aggressive DoS: kicka clients **e** impede reconexão. Só usar em redes
+próprias.
 
-**Limitação atual**: nosso `arp_throttle` não faz forwarding real (só
-cycle on/off). Pra mitm_capture funcionar, precisa do "forwarding com
-rate limit" do roadmap (ARP poisoning real → ESP repassa pacotes).
-Marcado como blocked até essa feature.
+### `mitm_capture` ⚠ versão "weak" implementada em 2026-05-05
 
-### `tracker_hunt`
+**O que combina**: `arp_cut` modo drop + `pcap_start` filter=data + bssid.
 
-**O que combina**: `ble_scan(active, 60s)` em loop + agregação de devices
-com flag `tracker` setada.
+Pipeline: ESP poisona vítima e gateway → todo tráfego da vítima vai pra
+ESP_MAC → ESP **NÃO encaminha** (vítima offline) → mas captura tudo que
+a vítima tenta enviar via promiscuous + emite TLV `PCAP_FRAME 0x40`.
 
-Cada `BLE_SCAN_DEV` recebido é agregado por MAC (se MAC privado randomizar,
-pode usar mfg_data hash como ID). Se um tracker aparecer em 3 scans
-consecutivos com RSSI estável → emite alerta `TRACKER_PERSISTENT 0x2B`.
+Args: `target_ip`, `target_mac`, `gateway_ip`, `gateway_mac`, `bssid`,
+`channel`, `duration_sec` (5–300, default 60).
 
-Útil pra rodar 24/7 detectando AirTag stalking sem precisar do app
-processar.
+Resposta: `{"resp":"mitm_capture","status":"started","mode":"weak_drop_capture"}`.
+
+**Limitação importante**: NÃO é MITM clássico. Vítima fica offline durante
+captura (sem internet). Para MITM real (forwarding com pacotes
+encaminhados pra gateway, vítima online), exigiria:
+1. `arp_throttle` com **forwarding real** (lwIP raw inject + recálculo de
+   checksums + rate-limit per-flow)
+2. Ou modo APSTA atuando como roteador entre AP legítimo e SoftAP novo
+
+Ambos são refactors grandes. Por enquanto, "weak drop capture" cobre
+casos de pesquisa de tráfego sem precisar manter conectividade da vítima.
+
+### `tracker_hunt` ⚠ versão simples implementada em 2026-05-05
+
+**O que combina**: `ble_scan(active, duration_sec)` longo. Devices com
+flag `tracker` setada no payload `BLE_SCAN_DEV` (Apple Find My / Samsung
+SmartTag / Tile / Chipolo) são reportados normalmente. Args:
+`duration_sec` (30–3600, default 300).
+
+**Agregação multi-scan no firmware ainda pendente**: a heurística completa
+(device persistir em ≥3 scans consecutivos com RSSI estável → emit
+`TRACKER_PERSISTENT 0x2B`) requer:
+- Loop de scans repetidos com tabela de estado entre runs
+- Histórico de RSSI por MAC com janela deslizante
+- Correlação com mfg_data pra MACs random rotativos (AirTag muda ~15min)
+
+Por enquanto, app correlaciona: salva devices vistos, refaz scan após
+N min, compara, alerta visual se mesmo device persistir.
 
 ---
 

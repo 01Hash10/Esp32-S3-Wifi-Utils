@@ -24,6 +24,13 @@ __attribute__((weak)) void watchdog_hook_evil_twin(const uint8_t bssid_a[6],
     (void)bssid_a; (void)rssi_a; (void)bssid_b; (void)rssi_b; (void)channel;
 }
 
+// Hook opcional do macro karma_then_twin. Idem padrão weak.
+__attribute__((weak)) void macros_hook_karma_hit(const uint8_t src[6],
+        const uint8_t *ssid, uint8_t ssid_len)
+{
+    (void)src; (void)ssid; (void)ssid_len;
+}
+
 #define MAX_DEDUP_ENTRIES   256
 #define MAX_SSID_LEN        32
 
@@ -1111,6 +1118,8 @@ static void promisc_cb_karma(void *buf, wifi_promiscuous_pkt_type_t type)
 
     if (karma_track_unique(src, ssid, ssid_len)) {
         emit_karma_hit(src, ssid, ssid_len);
+        // Hook opcional pro macro karma_then_twin agregar internamente
+        macros_hook_karma_hit(src, ssid, ssid_len);
     }
 }
 

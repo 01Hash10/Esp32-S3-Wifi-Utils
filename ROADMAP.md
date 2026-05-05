@@ -118,11 +118,11 @@ ou removidos ao longo do projeto.
 - [x] `wpa_capture_kick` — `wpa_capture` + delay 150ms + `deauth(broadcast)` na mesma sessão
 - [x] `pmkid_capture_kick` — análogo: `pmkid_capture` + `deauth`
 - [x] `evil_twin_kick` — `evil_twin_start` + opcional `deauth(legit_bssid)`
-- [ ] `karma_then_twin` — exige callback API pra macro escutar `KARMA_HIT`s internamente; refator não-trivial pendente
+- [x] `karma_then_twin` — hook weak `macros_hook_karma_hit` no sniff_wifi + agregação interna no command_router + spawn task que decide top SSID e dispara `evil_twin_start`
 - [x] `recon_full` — `wifi_scan(passive,all)` + `ble_scan(active,15s)` + (opt) `lan_scan` paralelos
-- [ ] `deauth_storm` — `deauth` + `channel_jam` requer relax do `s_busy` em hacking_wifi (atualmente exclusive entre eles)
-- [ ] `mitm_capture` — bloqueado pela falta de forwarding real no `arp_throttle`
-- [ ] `tracker_hunt` — aggregação multi-scan, fica como evolução do `ble_defense`
+- [x] `deauth_storm` — nova função `hacking_wifi_deauth_storm` em uma task única que intercala burst de deauths + RTS jam (evita conflito de s_busy)
+- [~] `mitm_capture` — versão "weak": `arp_cut` modo drop + `pcap_start` filter=data por bssid. Vítima offline mas ESP captura tráfego dela. Forwarding real (MITM clássico com pacotes encaminhados) ainda bloqueado pelo lwIP raw injection — fica como evolução
+- [~] `tracker_hunt` — versão simples: `ble_scan` ativo longo. Agregação multi-scan no firmware (TLV `TRACKER_PERSISTENT 0x2B`) ainda pendente — app correlaciona os `BLE_SCAN_DEV` com flag `tracker` por enquanto
 
 ### Playbook engine (médio prazo)
 

@@ -935,16 +935,74 @@ App grava pcap → hashcat
 - Não há TLV próprio do macro — app correlaciona pelos TLVs das
   primitivas (mais flexível, menos prescritivo).
 
-### Pendentes
-- `karma_then_twin` (decisão automática top-SSID): exige callback API
-  pra macro escutar `KARMA_HIT`s internamente. Refator não-trivial,
-  fica pra próximo commit.
-- `deauth_storm` (deauth + channel_jam): trivial, mas comprometería
-  s_busy de hacking_wifi (deauth e channel_jam compartilham).
-  Implementação requer relax desse mutex.
-- `mitm_capture`: bloqueado pela falta de forwarding real no arp_throttle.
-- `tracker_hunt`: aggregação multi-scan, fica como evolução do
-  ble_defense.
+### `karma_then_twin` (✅ entregue 2026-05-05)
+
+Mini-playbook embutido. Pipeline:
+1. Inicia `sniff_wifi_karma_start(channel, duration)` que escuta probe req
+   e responde com probe response forjado.
+2. Hook **weak** `macros_hook_karma_hit(src, ssid, ssid_len)` declarado em
+   sniff_wifi.c, override forte em command_router.c.
+3. Hook agrega hits por SSID em tabela (cap 32). Roda na NimBLE host task
+   (sem alocação dinâmica, fast).
+4. Task auxiliar `karma_then_twin_task` aguarda duration + 500ms folga,
+   tira a flag `s_kt_active` (hook vira no-op), encontra top-1 SSID.
+5. Dispara `evil_twin_start(top_ssid, password?, channel, max_conn=4)`.
+6. Emite resposta JSON final assíncrona com status (twin_up | no_hits |
+   twin_failed).
+
+Args: `channel`, `duration_sec` (5–120, default 30), `password` (opcional WPA2).
+
+### `deauth_storm` (✅ entregue 2026-05-05)
+
+Single task que intercala deauth + RTS jam pra evitar conflito do
+s_busy global do hacking_wifi (deauth, beacon_flood, channel_jam são
+mutex entre si).
+
+Pipeline interno:
+1. set_channel
+2. Burst inicial de `deauth_count` deauths (3ms entre cada)
+3. Loop até `jam_seconds`: 30 RTS frames (25ms cada, NAV lock) + 5 deauths
+4. Final logado
+
+Args: `bssid`, `target?` (default broadcast), `channel`, `deauth_count`
+(10–500, default 50), `jam_seconds` (5–60, default 15).
+
+### `mitm_capture` ⚠ "weak" (✅ entregue 2026-05-05, mas com limitação)
+
+Combina `arp_cut` (modo drop) + `pcap_start(filter=data, bssid=AP)`.
+Vítima fica **offline** durante captura — ESP poisona ARP cache mas não
+encaminha pacotes. Mesmo offline, ESP captura tudo que vítima tenta
+enviar via promiscuous + emite TLV `PCAP_FRAME 0x40`.
+
+Args: `target_ip`, `target_mac`, `gateway_ip`, `gateway_mac`, `bssid`,
+`channel`, `duration_sec` (5–300, default 60).
+
+**Não é MITM clássico**. Pra MITM real (forwarding com vítima online),
+exigiria:
+- `arp_throttle` com forwarding via lwIP raw inject + recálculo de
+  checksums + rate-limit per-flow
+- OU modo APSTA atuando como roteador
+
+Ambos são refactors grandes — fica como evolução. "weak drop capture"
+cobre pesquisa de tráfego sem precisar manter conectividade da vítima.
+
+### `tracker_hunt` ⚠ versão simples (✅ entregue 2026-05-05)
+
+Versão atual: `ble_scan(active, duration_sec)` longo (cap 1h). Devices
+com flag `tracker` setada (Apple Find My / Samsung SmartTag / Tile /
+Chipolo) são reportados via `BLE_SCAN_DEV 0x12`.
+
+Args: `duration_sec` (30–3600, default 300).
+
+**Agregação multi-scan no firmware ainda pendente** (TLV
+`TRACKER_PERSISTENT 0x2B` reservado mas não emitido). Heurística completa:
+- Loop de scans com tabela de estado entre runs
+- Histórico de RSSI por MAC com janela deslizante
+- Correlação com mfg_data pra MACs random rotativos
+- Persistente em ≥3 scans consecutivos + RSSI estável (±10 dBm) → emit alert
+
+Por enquanto, app agrega correlacionando os `BLE_SCAN_DEV` entre múltiplas
+chamadas. Firmware-side fica como evolução depois.
 
 ---
 
