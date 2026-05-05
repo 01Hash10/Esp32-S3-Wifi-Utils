@@ -351,6 +351,53 @@ static void handle_wpa_capture_stop(cJSON *root)
     }
 }
 
+static void handle_pmkid_capture(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (attack_lan_is_connected()) {
+        send_err(seq, "wifi_busy", "disconnect first");
+        return;
+    }
+
+    cJSON *bssid_j = cJSON_GetObjectItemCaseSensitive(root, "bssid");
+    cJSON *ch_j    = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *dur_j   = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+
+    uint8_t bssid[6];
+    if (!cJSON_IsString(bssid_j) || parse_mac(bssid_j->valuestring, bssid) != 0) {
+        send_err(seq, "bad_bssid", NULL);
+        return;
+    }
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 13) {
+        send_err(seq, "bad_channel", NULL);
+        return;
+    }
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 60;
+    if (dur < 1)   dur = 1;
+    if (dur > 600) dur = 600;
+
+    esp_err_t err = sniff_wifi_pmkid_start(bssid, (uint8_t)ch_j->valueint,
+                                            (uint16_t)dur);
+    if (err == ESP_OK) {
+        send_ack(seq, "pmkid_capture");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "sniff_busy", NULL);
+    } else {
+        send_err(seq, "sniff_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_pmkid_capture_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = sniff_wifi_pmkid_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "pmkid_capture_stop");
+    } else {
+        send_err(seq, "sniff_idle", NULL);
+    }
+}
+
 static void handle_lan_scan(cJSON *root)
 {
     int seq = seq_of(root);
@@ -560,6 +607,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_wpa_capture(root);
     } else if (strcmp(c, "wpa_capture_stop") == 0) {
         handle_wpa_capture_stop(root);
+    } else if (strcmp(c, "pmkid_capture") == 0) {
+        handle_pmkid_capture(root);
+    } else if (strcmp(c, "pmkid_capture_stop") == 0) {
+        handle_pmkid_capture_stop(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }
@@ -572,6 +623,6 @@ esp_err_t command_router_init(void)
     ESP_LOGI(TAG, "ready (cmds: ping, hello, status, wifi_scan, ble_scan, ble_scan_stop,"
                   " deauth, beacon_flood, ble_spam_apple, wifi_connect, wifi_disconnect,"
                   " arp_cut, arp_cut_stop, lan_scan, probe_sniff, probe_sniff_stop,"
-                  " wpa_capture, wpa_capture_stop)");
+                  " wpa_capture, wpa_capture_stop, pmkid_capture, pmkid_capture_stop)");
     return ESP_OK;
 }

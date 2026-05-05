@@ -491,3 +491,214 @@ esp_err_t sniff_wifi_eapol_stop(void)
     s_stop = true;
     return ESP_OK;
 }
+
+// ----------------------------------------------------------------------
+// PMKID capture (extrai PMKID KDE do M1 sem precisar do 4-way completo)
+// ----------------------------------------------------------------------
+
+#define PMKID_LEN 16
+
+// Estado promisc (pmkid)
+static volatile uint8_t s_pmkid_count = 0;
+
+// Procura PMKID KDE no Key Data field. Retorna ponteiro pros 16 bytes do
+// PMKID se encontrar, NULL caso contrário.
+//
+// KDE format:  type(0xDD) | length | OUI(00:0F:AC) | datatype(0x04) | PMKID(16)
+// length = 4 (OUI+datatype) + 16 (pmkid) = 20 = 0x14
+static const uint8_t *find_pmkid_kde(const uint8_t *kd, uint16_t kd_len)
+{
+    uint16_t i = 0;
+    while (i + 2 <= kd_len) {
+        uint8_t  t   = kd[i];
+        uint8_t  len = kd[i + 1];
+        if ((uint16_t)i + 2 + len > kd_len) break;
+        if (t == 0xDD && len >= 4 + PMKID_LEN) {
+            const uint8_t *body = &kd[i + 2];
+            if (body[0] == 0x00 && body[1] == 0x0F && body[2] == 0xAC &&
+                body[3] == 0x04) {
+                return &body[4]; // PMKID
+            }
+        }
+        i = (uint16_t)(i + 2 + len);
+    }
+    return NULL;
+}
+
+static void emit_pmkid_found(const uint8_t bssid[6], const uint8_t sta[6],
+                              const uint8_t pmkid[PMKID_LEN])
+{
+    uint8_t payload[6 + 6 + PMKID_LEN];
+    memcpy(&payload[0],  bssid, 6);
+    memcpy(&payload[6],  sta,   6);
+    memcpy(&payload[12], pmkid, PMKID_LEN);
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_PMKID_FOUND, s_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void emit_pmkid_done(const uint8_t bssid[6], uint8_t count,
+                             uint32_t elapsed_ms, uint8_t status)
+{
+    uint8_t payload[12];
+    memcpy(&payload[0], bssid, 6);
+    payload[6]  = count;
+    payload[7]  = (uint8_t)(elapsed_ms >> 24);
+    payload[8]  = (uint8_t)(elapsed_ms >> 16);
+    payload[9]  = (uint8_t)(elapsed_ms >> 8);
+    payload[10] = (uint8_t)(elapsed_ms & 0xFF);
+    payload[11] = status;
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_PMKID_DONE, s_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void promisc_cb_pmkid(void *buf, wifi_promiscuous_pkt_type_t type)
+{
+    if (type != WIFI_PKT_DATA) return;
+    const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
+    const uint8_t *p = pkt->payload;
+    uint16_t len = pkt->rx_ctrl.sig_len;
+    if (len < 24 + 8 + 4) return;
+
+    if ((p[0] & 0x0C) != 0x08) return;      // Data type
+    if (p[1] & 0x40) return;                // Protected? skip
+
+    bool qos = (p[0] & 0x80) != 0;
+    uint16_t hdr_len = qos ? 26 : 24;
+    if (len < hdr_len + 8 + 4 + 95) return;
+
+    uint8_t ds = p[1] & 0x03;
+    const uint8_t *bssid;
+    const uint8_t *sta;
+    switch (ds) {
+    case 0x01: bssid = &p[4];  sta = &p[10]; break;
+    case 0x02: bssid = &p[10]; sta = &p[4];  break;
+    default: return;
+    }
+    if (memcmp(bssid, (const void *)s_eapol_target_bssid, 6) != 0) return;
+
+    const uint8_t *llc = &p[hdr_len];
+    if (!(llc[0] == 0xAA && llc[1] == 0xAA && llc[2] == 0x03 &&
+          llc[3] == 0x00 && llc[4] == 0x00 && llc[5] == 0x00 &&
+          llc[6] == 0x88 && llc[7] == 0x8E)) return;
+
+    const uint8_t *eapol = &p[hdr_len + 8];
+    if (eapol[1] != 0x03) return; // EAPOL-Key
+
+    // Filtra M1: ACK=1, MIC=0
+    uint16_t key_info = ((uint16_t)eapol[5] << 8) | eapol[6];
+    bool ack = (key_info & 0x0080) != 0;
+    bool mic = (key_info & 0x0100) != 0;
+    if (!(ack && !mic)) return;
+
+    // EAPOL-Key body começa em eapol+1 (descriptor type) +
+    //   key_info(2) + key_len(2) + replay(8) + nonce(32) + iv(16) +
+    //   rsc(8) + reserved(8) + mic(16) = 92 bytes apos descriptor type
+    // Total fixed before key_data: 1 + 2 + 2 + 8 + 32 + 16 + 8 + 8 + 16 = 93
+    // E mais key_data_len(2 bytes BE) = 95
+    if (len < (uint16_t)(hdr_len + 8 + 4 + 95 + 4)) return;
+
+    uint16_t kd_len = ((uint16_t)eapol[97] << 8) | eapol[98];
+    if (kd_len == 0 || kd_len > 512) return;
+
+    // Bound check: o payload do EAPOL pode ter sido truncado pela rádio.
+    uint16_t payload_remaining = (uint16_t)(len - (hdr_len + 8 + 4 + 95) - 4); // -FCS
+    if (kd_len > payload_remaining) kd_len = payload_remaining;
+
+    const uint8_t *kd = &eapol[99];
+    const uint8_t *pmkid = find_pmkid_kde(kd, kd_len);
+    if (!pmkid) return;
+
+    s_pmkid_count++;
+    uint8_t bssid_copy[6], sta_copy[6], pmkid_copy[PMKID_LEN];
+    memcpy(bssid_copy, bssid, 6);
+    memcpy(sta_copy,   sta,   6);
+    memcpy(pmkid_copy, pmkid, PMKID_LEN);
+    emit_pmkid_found(bssid_copy, sta_copy, pmkid_copy);
+}
+
+static void pmkid_task(void *arg)
+{
+    eapol_ctx_t *ctx = (eapol_ctx_t *)arg;
+    int64_t start_us = esp_timer_get_time();
+    int64_t deadline_us = start_us + (int64_t)ctx->duration_sec * 1000000LL;
+
+    memcpy((void *)s_eapol_target_bssid, ctx->bssid, 6);
+    s_pmkid_count = 0;
+
+    wifi_promiscuous_filter_t filter = {
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA,
+    };
+    esp_wifi_set_promiscuous_filter(&filter);
+
+    esp_err_t err = esp_wifi_set_promiscuous(true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set_promiscuous rc=%s", esp_err_to_name(err));
+        emit_pmkid_done(ctx->bssid, 0, 0, 2);
+        goto cleanup;
+    }
+    esp_wifi_set_promiscuous_rx_cb(&promisc_cb_pmkid);
+    esp_wifi_set_channel(ctx->channel, WIFI_SECOND_CHAN_NONE);
+
+    // Para por 1ª PMKID encontrada OU duração
+    while (!s_stop && esp_timer_get_time() < deadline_us) {
+        if (s_pmkid_count >= 1) break;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    esp_wifi_set_promiscuous(false);
+
+    uint32_t elapsed = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+    uint8_t status = (s_pmkid_count > 0) ? 0 : 1;
+    emit_pmkid_done(ctx->bssid, s_pmkid_count, elapsed, status);
+    ESP_LOGI(TAG, "pmkid_capture done: %u found in %u ms",
+             (unsigned)s_pmkid_count, (unsigned)elapsed);
+
+cleanup:
+    free(ctx);
+    s_stop = false;
+    s_task = NULL;
+    s_mode = SNIFF_MODE_IDLE;
+    vTaskDelete(NULL);
+}
+
+esp_err_t sniff_wifi_pmkid_start(const uint8_t bssid[6], uint8_t channel,
+                                  uint16_t duration_sec)
+{
+    if (s_mode != SNIFF_MODE_IDLE) return ESP_ERR_INVALID_STATE;
+    if (!bssid) return ESP_ERR_INVALID_ARG;
+    if (channel == 0 || channel > 13) return ESP_ERR_INVALID_ARG;
+    if (duration_sec == 0) duration_sec = 60;
+    if (duration_sec > 600) duration_sec = 600;
+
+    eapol_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return ESP_ERR_NO_MEM;
+    memcpy(ctx->bssid, bssid, 6);
+    ctx->channel = channel;
+    ctx->duration_sec = duration_sec;
+
+    s_mode = SNIFF_MODE_PMKID;
+    s_stop = false;
+    if (xTaskCreate(pmkid_task, "pmkid_cap", 4096, ctx, 5, &s_task) != pdPASS) {
+        free(ctx);
+        s_mode = SNIFF_MODE_IDLE;
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "pmkid_capture started: bssid=%02x:%02x:%02x:%02x:%02x:%02x ch=%u",
+             bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5], channel);
+    return ESP_OK;
+}
+
+esp_err_t sniff_wifi_pmkid_stop(void)
+{
+    if (s_mode != SNIFF_MODE_PMKID) return ESP_ERR_INVALID_STATE;
+    s_stop = true;
+    return ESP_OK;
+}

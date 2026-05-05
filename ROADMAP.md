@@ -92,7 +92,7 @@ ou removidos ao longo do projeto.
 - [x] LAN host discovery — ARP scan no /24 (`lan_scan`)
 
 ### Demais
-- [ ] PMKID capture
+- [x] PMKID capture (`pmkid_capture` — extrai PMKID KDE do M1, hash hashcat WPA*02)
 - [x] Probe request sniffing (`probe_sniff` + dedup por mac/ssid + channel hop)
 - [ ] Dossiê de devices a partir de probe history (lado app — agregação multi-sessão)
 - [ ] Evil twin / Captive portal (AP fake + DNS hijack)

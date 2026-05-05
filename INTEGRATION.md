@@ -119,6 +119,8 @@ Frame:
 | `probe_sniff_stop` | `seq` | `{"resp":"probe_sniff_stop","seq":N,"status":"started"}` (encerra cedo). | 3 |
 | `wpa_capture` | `seq`, `bssid` (string MAC), `channel` (1–13), `duration_sec` (opcional, default 60, max 600) | `{"resp":"wpa_capture","seq":N,"status":"started"}` (ack imediato; cada EAPOL via TLV `WPA_EAPOL` em `stream`, fim via `WPA_CAPTURE_DONE`). **Requer ESP NÃO conectado**. Encerra automaticamente se M1..M4 todos vistos. Para forçar handshake, app pode disparar `deauth` em paralelo. | 3 |
 | `wpa_capture_stop` | `seq` | `{"resp":"wpa_capture_stop","seq":N,"status":"started"}` (encerra cedo). | 3 |
+| `pmkid_capture` | `seq`, `bssid` (string MAC), `channel` (1–13), `duration_sec` (opcional, default 60, max 600) | `{"resp":"pmkid_capture","seq":N,"status":"started"}` (ack imediato; PMKID via TLV `PMKID_FOUND` em `stream`, fim via `PMKID_DONE`). **Requer ESP NÃO conectado**. Encerra automaticamente na 1ª PMKID encontrada. App fornece ESSID separadamente pra montar hash hashcat `WPA*02*pmkid*ap*sta*essid`. | 3 |
+| `pmkid_capture_stop` | `seq` | `{"resp":"pmkid_capture_stop","seq":N,"status":"started"}` (encerra cedo). | 3 |
 
 ### Erros padronizados
 
@@ -196,6 +198,8 @@ Toda resposta de erro segue o schema:
 | `0x17` | `PROBE_DONE` | device → app | resumo final do `probe_sniff` | 3 |
 | `0x18` | `WPA_EAPOL` | device → app | 1 frame 802.11+EAPOL capturado pelo `wpa_capture` | 3 |
 | `0x19` | `WPA_CAPTURE_DONE` | device → app | resumo final do `wpa_capture` | 3 |
+| `0x1A` | `PMKID_FOUND` | device → app | 1 PMKID extraído de M1 (compacto, 28B) | 3 |
+| `0x1B` | `PMKID_DONE` | device → app | resumo final do `pmkid_capture` | 3 |
 | `0x20` | `HACK_DEAUTH_DONE` | device → app | resultado final do `deauth` | 3 |
 | `0x21` | `HACK_BEACON_DONE` | device → app | resultado final do `beacon_flood` | 3 |
 | `0x22` | `HACK_BLE_SPAM_DONE` | device → app | resultado final do `ble_spam_apple` | 4 |
@@ -334,6 +338,27 @@ Toda resposta de erro segue o schema:
 | 7 | 1 | `msg_mask` | bitmask: bit0=M1, bit1=M2, bit2=M3, bit3=M4. `0x0F` = 4-way completo |
 | 8 | 4 | `elapsed_ms` | uint32 BE, duração total |
 | 12 | 1 | `status` | 0 = ok (M1..M4 todos), 1 = parcial / timeout, 2 = erro |
+
+### `0x1A PMKID_FOUND` — payload (28 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `bssid` | BSSID do AP (BE) |
+| 6 | 6 | `sta_mac` | MAC do cliente (BE) |
+| 12 | 16 | `pmkid` | PMKID extraído do KDE OUI `00:0F:AC` type `0x04` no Key Data do M1 |
+
+> Pra o app montar o hash hashcat: `WPA*02*<pmkid_hex>*<bssid_hex>*<sta_hex>*<essid_hex>`
+> onde `essid_hex` é o ESSID do AP em hex (app sabe — typically vem do `wifi_scan`).
+> `hashcat -m 22000 hash.hc22000 wordlist.txt`
+
+### `0x1B PMKID_DONE` — payload (12 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 6 | `bssid` | BSSID alvo (eco do request) |
+| 6 | 1 | `count` | total de PMKIDs encontrados (geralmente 0 ou 1) |
+| 7 | 4 | `elapsed_ms` | uint32 BE |
+| 11 | 1 | `status` | 0 = ok (encontrou), 1 = timeout sem PMKID, 2 = erro |
 
 ### `0x20 HACK_DEAUTH_DONE` — payload (7 bytes)
 
@@ -479,3 +504,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3 | Comando `lan_scan`: ARP scan no /24 do IP atual (requer `wifi_connect`). Emite TLV `LAN_HOST 0x14` por host descoberto + `LAN_SCAN_DONE 0x15` ao final. |
 | 2026-05-05 | Phase 3 | Comandos `probe_sniff` / `probe_sniff_stop`: sniffer de probe requests via WiFi promiscuous mode com channel hopping. Requer ESP não-conectado. Emite TLV `PROBE_REQ 0x16` por (mac, ssid) único + `PROBE_DONE 0x17` ao final. Erros novos: `wifi_busy`, `sniff_busy`, `sniff_failed`, `sniff_idle`. |
 | 2026-05-05 | Phase 3 | Comandos `wpa_capture` / `wpa_capture_stop`: captura EAPOL 4-way handshake num BSSID/canal específico. Emite TLV `WPA_EAPOL 0x18` por frame (frame 802.11 bruto, pcap-friendly) + `WPA_CAPTURE_DONE 0x19` com mask M1..M4. Encerra cedo se 4-way completo. App pode emitir `deauth` paralelo pra forçar handshake. |
+| 2026-05-05 | Phase 3 | Comandos `pmkid_capture` / `pmkid_capture_stop`: extrai PMKID KDE (OUI `00:0F:AC`/type `0x04`) do EAPOL-Key M1. Compacto: TLV `PMKID_FOUND 0x1A` (28B) + `PMKID_DONE 0x1B`. Encerra na 1ª PMKID. ESSID fornecido pelo app pra montar hash hashcat WPA*02. |
