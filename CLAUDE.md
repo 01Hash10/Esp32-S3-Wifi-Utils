@@ -83,6 +83,16 @@ Usar `monitor.sh` (pyserial direto).
   que adiciona o código no firmware. Sem documentação ↔ feature incompleta.
   Aplicar isso desde a Phase 1 e por todo o resto do desenvolvimento.
 
+- **Manual técnico / estudo**: `METHODS.md` é a documentação viva de
+  **o que cada método faz, como faz e o fluxo dos dados**. Foco em
+  teoria (RFC / 802.11 / BLE), implementação interna e diagrama textual
+  do fluxo App ↔ ESP ↔ ar.
+
+  **Regra obrigatória**: toda feature nova **DEVE** ter sua entrada em
+  `METHODS.md` no mesmo commit que a implementa, no formato:
+  O que faz / Como funciona / Implementação / Fluxo / Limitações.
+  Sem entrada lá ↔ feature incompleta.
+
 ## Convenções
 
 - Sem comentários narrativos no código (manter `main.c` enxuto).
