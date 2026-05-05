@@ -51,8 +51,8 @@ ou removidos ao longo do projeto.
 - [ ] Lookup de OUI (vendor a partir do MAC) — **lado-app** (tabela OUI ~50KB; firmware emite MAC, app resolve vendor)
 - [x] Detecção de WPS habilitado (flag bit1 no `WIFI_SCAN_AP`)
 - [ ] Histórico de RSSI por BSSID — **lado-app** (agregação multi-scan)
-- [ ] Captura de pcap (promiscuous streaming, sem storage no ESP) — vai virar TLV faixa 0x40
-- [ ] Export de pcap via BLE pro app — junto com o item acima
+- [x] Captura de pcap (promiscuous streaming, sem storage no ESP) — `pcap_start` emite TLV `PCAP_FRAME 0x40` em tempo real
+- [x] Export de pcap via BLE pro app — script monta arquivo LINKTYPE 105 a partir dos TLVs
 
 ### BLE
 - [x] Scan passivo (NimBLE GAP discover)

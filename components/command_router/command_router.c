@@ -419,6 +419,82 @@ static void handle_pmkid_capture_stop(cJSON *root)
     }
 }
 
+static uint8_t parse_pcap_filter(const char *s)
+{
+    if (!s) return SNIFF_PCAP_FILTER_MGMT;
+    if (strcmp(s, "all") == 0)  return SNIFF_PCAP_FILTER_ALL;
+    if (strcmp(s, "mgmt") == 0) return SNIFF_PCAP_FILTER_MGMT;
+    if (strcmp(s, "data") == 0) return SNIFF_PCAP_FILTER_DATA;
+    if (strcmp(s, "ctrl") == 0) return SNIFF_PCAP_FILTER_CTRL;
+    // Suporte a "mgmt+data" etc.
+    uint8_t mask = 0;
+    if (strstr(s, "mgmt")) mask |= SNIFF_PCAP_FILTER_MGMT;
+    if (strstr(s, "data")) mask |= SNIFF_PCAP_FILTER_DATA;
+    if (strstr(s, "ctrl")) mask |= SNIFF_PCAP_FILTER_CTRL;
+    return mask;
+}
+
+static void handle_pcap_start(cJSON *root)
+{
+    int seq = seq_of(root);
+    if (attack_lan_is_connected()) {
+        send_err(seq, "wifi_busy", "disconnect first");
+        return;
+    }
+
+    cJSON *ch_j     = cJSON_GetObjectItemCaseSensitive(root, "channel");
+    cJSON *filter_j = cJSON_GetObjectItemCaseSensitive(root, "filter");
+    cJSON *bssid_j  = cJSON_GetObjectItemCaseSensitive(root, "bssid");
+    cJSON *dur_j    = cJSON_GetObjectItemCaseSensitive(root, "duration_sec");
+
+    if (!cJSON_IsNumber(ch_j) || ch_j->valueint < 1 || ch_j->valueint > 13) {
+        send_err(seq, "bad_channel", NULL);
+        return;
+    }
+    uint8_t filter = SNIFF_PCAP_FILTER_MGMT;
+    if (cJSON_IsString(filter_j)) {
+        filter = parse_pcap_filter(filter_j->valuestring);
+        if (filter == 0) {
+            send_err(seq, "bad_filter", "mgmt|data|ctrl|all|mgmt+data|...");
+            return;
+        }
+    }
+    uint8_t bssid[6];
+    bool has_bssid = false;
+    if (cJSON_IsString(bssid_j) && bssid_j->valuestring[0]) {
+        if (parse_mac(bssid_j->valuestring, bssid) != 0) {
+            send_err(seq, "bad_bssid", NULL);
+            return;
+        }
+        has_bssid = true;
+    }
+    int dur = cJSON_IsNumber(dur_j) ? dur_j->valueint : 60;
+    if (dur < 1)   dur = 1;
+    if (dur > 300) dur = 300;
+
+    esp_err_t err = sniff_wifi_pcap_start((uint8_t)ch_j->valueint, filter,
+                                           has_bssid ? bssid : NULL,
+                                           (uint16_t)dur);
+    if (err == ESP_OK) {
+        send_ack(seq, "pcap_start");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        send_err(seq, "sniff_busy", NULL);
+    } else {
+        send_err(seq, "sniff_failed", esp_err_to_name(err));
+    }
+}
+
+static void handle_pcap_stop(cJSON *root)
+{
+    int seq = seq_of(root);
+    esp_err_t err = sniff_wifi_pcap_stop();
+    if (err == ESP_OK) {
+        send_ack(seq, "pcap_stop");
+    } else {
+        send_err(seq, "sniff_idle", NULL);
+    }
+}
+
 static void handle_arp_throttle(cJSON *root)
 {
     int seq = seq_of(root);
@@ -769,6 +845,10 @@ void command_router_handle_json(const uint8_t *data, size_t len)
         handle_pmkid_capture(root);
     } else if (strcmp(c, "pmkid_capture_stop") == 0) {
         handle_pmkid_capture_stop(root);
+    } else if (strcmp(c, "pcap_start") == 0) {
+        handle_pcap_start(root);
+    } else if (strcmp(c, "pcap_stop") == 0) {
+        handle_pcap_stop(root);
     } else {
         send_err(seq_of(root), "unknown_cmd", c);
     }

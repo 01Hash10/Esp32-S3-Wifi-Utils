@@ -36,8 +36,99 @@ firmware, explica:
 - [Probe request sniffing (`probe_sniff`)](#probe_sniff--captura-de-probe-requests)
 - [WPA handshake capture (`wpa_capture`)](#wpa_capture--captura-do-eapol-4-way-handshake)
 - [PMKID capture (`pmkid_capture`)](#pmkid_capture--extracao-de-pmkid-do-m1)
+- [Pcap streaming (`pcap_start`)](#pcap_start--streaming-de-frames-80211-via-ble)
 
-### Phase 4 — BLE
+### `pcap_start` — streaming de frames 802.11 via BLE
+
+**O que faz**: captura frames 802.11 num canal fixo e os envia em
+tempo real pro app via TLV `PCAP_FRAME` no `stream`. App gera arquivo
+.pcap legível por Wireshark/tcpdump. **Sem storage local no ESP** —
+frames vão direto pro app.
+
+**Por que não armazenar no ESP**: decisão arquitetural pro futuro
+MITM streaming. PSRAM tem 8MB, mas WiFi pode gerar 100+ KB/s; ringbuffer
+local seria saturado em segundos. Filtrando + rate-limit + BLE notify
+chega no app, e quem quiser persistir é o lado mobile (sem limite de
+disco).
+
+**Como funciona**:
+- Modo promiscuous ESP-IDF (mesma infra do `probe_sniff`/`wpa_capture`).
+- Filtro de hardware: `WIFI_PROMIS_FILTER_MASK_{MGMT,DATA,CTRL}` combinados
+  conforme arg do app.
+- Filtro adicional opcional: BSSID (frame só passa se addr1, addr2 ou
+  addr3 = bssid alvo). Reduz volume drasticamente quando focando em 1 rede.
+- Rate-limit interno: 5ms mínimo entre emits (200 fps teóricos = 50
+  KB/s no MTU 247). Frames em excesso vão pro contador `dropped`.
+
+**Frame TLV** (`PCAP_FRAME 0x40`, payload):
+```
+[0..3]  timestamp_us (uint32 BE) — relativo ao pcap_start
+[4..5]  orig_len (uint16 BE) — frame original sem FCS
+[6]     flags (bit0 = truncated)
+[7..]   frame bytes (max 236, trunca se > 236)
+```
+
+**Implementação** (`sniff_wifi.c`, modo PCAP):
+- `promisc_cb_pcap()`:
+  - Verifica tipo (mgmt/data/ctrl) contra filter mask.
+  - Se BSSID filter ativo, checa addr1/addr2/addr3.
+  - Rate-limit por timestamp interno (`s_pcap_last_emit_us`).
+  - Codifica TLV e chama `transport_ble_send_stream`.
+- Task wrapper:
+  - Set channel fixo, set promiscuous, esperar duration_sec ou stop.
+  - Final: emit `PCAP_DONE 0x41` com emitted/dropped/elapsed_ms.
+
+**Fluxo**:
+```
+App ──{"cmd":"pcap_start","channel":6,"filter":"mgmt","duration_sec":30}──→ ESP
+ESP ──ack──→ App
+
+  ESP fixa ch=6, filter=mgmt
+  promisc_cb_pcap (wifi task):
+    frame mgmt 0xC0 (deauth) 26B → emit TLV[0x40] (ts=12ms, len=26)
+    frame mgmt 0x80 (beacon) 250B → emit TLV[0x40] (ts=15ms, len=236, TRUNC)
+    frame mgmt 0x80 234ms depois → drop (5ms rate limit ainda ativo)
+    ...
+  fim do duration_sec
+  ESP ──TLV[0x41] PCAP_DONE (emitted=8500, dropped=1200, ...)──→ App
+
+App
+  recebe TLV[0x40] sequencial
+  monta arquivo .pcap (LINKTYPE_IEEE802_11=105):
+    pcap global header (24B) + 
+    pra cada frame: ts(4) + ts_us(4) + caplen(4) + origlen(4) + frame
+  Wireshark/tcpdump abre direto.
+```
+
+**Filtros disponíveis** (string no comando):
+- `"mgmt"` — só management (beacons, probes, deauth, assoc, auth)
+- `"data"` — só data frames
+- `"ctrl"` — só control (RTS, CTS, ACK)
+- `"all"` — todos
+- `"mgmt+data"` etc — combinações via substring
+
+**Limitações**:
+- Frame > 236B truncado (BLE MTU 247 - tlv_hdr 4 - pcap_hdr 7 = 236).
+  Pcap aceita caplen != origlen, então Wireshark mostra clipped — útil
+  pra mgmt frames (têm headers + IEs interessantes nos primeiros 200B);
+  problemático pra payload de data frames.
+- Rate-limit 5ms = ~200 fps. Em rede ocupada, dropados >> emitidos.
+  Solução: filtrar mais agressivo (mgmt apenas + bssid específico).
+- Channel fixo (sem hop). Pra hop, app pode chamar pcap_stop+start em
+  sequência mudando channel.
+- timestamp_us rolls over após ~71 min (uint32 µs). Pra captures longas,
+  timestamp absoluto teria que ser uint64 — fica futuro.
+- Sem storage local: se app desconecta no meio, frames perdidos.
+
+**Cenários de uso**:
+- Análise de mgmt traffic (probe behavior de devices nearby)
+- Captura de deauth attacks (combinar com `deauth_detect` futuro)
+- MITM streaming (depois com `arp_cut` + filtro em data IP) — esta API
+  é o substrato.
+
+---
+
+## Phase 4 — BLE
 - [Apple Continuity spam (`ble_spam_apple`)](#ble_spam_apple--apple-continuity-proximity-spam)
 - [Samsung EasySetup spam (`ble_spam_samsung`)](#ble_spam_samsung--samsung-easysetup-popup-spam)
 - [Google Fast Pair spam (`ble_spam_google`)](#ble_spam_google--google-fast-pair-popup-spam)

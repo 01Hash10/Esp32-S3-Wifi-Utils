@@ -128,6 +128,8 @@ Frame:
 | `wpa_capture_stop` | `seq` | `{"resp":"wpa_capture_stop","seq":N,"status":"started"}` (encerra cedo). | 3 |
 | `pmkid_capture` | `seq`, `bssid` (string MAC), `channel` (1–13), `duration_sec` (opcional, default 60, max 600) | `{"resp":"pmkid_capture","seq":N,"status":"started"}` (ack imediato; PMKID via TLV `PMKID_FOUND` em `stream`, fim via `PMKID_DONE`). **Requer ESP NÃO conectado**. Encerra automaticamente na 1ª PMKID encontrada. App fornece ESSID separadamente pra montar hash hashcat `WPA*02*pmkid*ap*sta*essid`. | 3 |
 | `pmkid_capture_stop` | `seq` | `{"resp":"pmkid_capture_stop","seq":N,"status":"started"}` (encerra cedo). | 3 |
+| `pcap_start` | `seq`, `channel` (1–13), `filter` (opcional, `"mgmt"`/`"data"`/`"ctrl"`/`"all"`/combinações `"mgmt+data"`, default `"mgmt"`), `bssid` (opcional, filtra por addr1/2/3 = bssid), `duration_sec` (opcional, 1–300, default 60) | `{"resp":"pcap_start","seq":N,"status":"started"}` (ack imediato; cada frame via TLV `PCAP_FRAME` em `stream`, fim via `PCAP_DONE`). **Requer ESP NÃO conectado**. Sem storage no ESP — frames vão direto pro app, sujeitos a rate-limit interno (~5ms entre frames). | 2 |
+| `pcap_stop` | `seq` | `{"resp":"pcap_stop","seq":N,"status":"started"}`. | 2 |
 
 ### Erros padronizados
 
@@ -212,6 +214,8 @@ Toda resposta de erro segue o schema:
 | `0x21` | `HACK_BEACON_DONE` | device → app | resultado final do `beacon_flood` | 3 |
 | `0x22` | `HACK_BLE_SPAM_DONE` | device → app | resultado final dos `ble_spam_*` (apple/samsung/google/multi) | 4 |
 | `0x23` | `HACK_JAM_DONE` | device → app | resultado final do `channel_jam` | 3 |
+| `0x40` | `PCAP_FRAME` | device → app | 1 frame 802.11 capturado pelo `pcap_start`, com timestamp relativo | 2 |
+| `0x41` | `PCAP_DONE` | device → app | resumo final do `pcap_start` (emitted/dropped/elapsed) | 2 |
 
 ### `0x00 HEARTBEAT` — payload (10 bytes)
 
@@ -425,6 +429,35 @@ Toda resposta de erro segue o schema:
 > pela ordem dos eventos (não há `seq` do JSON original no payload TLV —
 > o `seq` do TLV é incrementado independentemente).
 
+### `0x40 PCAP_FRAME` — payload
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 4 | `timestamp_us` | uint32 BE, µs desde o `pcap_start` (rola após ~71 min — ok pra captures até 5 min) |
+| 4 | 2 | `orig_len` | uint16 BE, tamanho ORIGINAL do frame 802.11 sem FCS (antes de truncar) |
+| 6 | 1 | `flags` | bit0 = truncated (frame > 236B), bits 1..7 = reservado |
+| 7 | até 236 | `frame` | bytes brutos do frame 802.11, pcap-friendly LINKTYPE 105 |
+
+> Para montar um arquivo .pcap legível pelo Wireshark/tcpdump:
+> 1. Pcap header global (24B): magic 0xA1B2C3D4 + version 2.4 + thiszone 0
+>    + sigfigs 0 + snaplen 65535 + linktype **105 (LINKTYPE_IEEE802_11)**.
+> 2. Pra cada `PCAP_FRAME`: registro de 16B (ts_sec + ts_usec + caplen +
+>    origlen) seguido dos `frame` bytes. `caplen` = `len(frame)`,
+>    `origlen` = campo `orig_len` do TLV.
+
+### `0x41 PCAP_DONE` — payload (9 bytes)
+
+| Offset | Tamanho | Campo | Descrição |
+|---|---|---|---|
+| 0 | 2 | `frames_emitted` | uint16 BE, frames TLV emitidos (= linhas no pcap) |
+| 2 | 2 | `frames_dropped` | uint16 BE, frames recebidos mas **descartados** pelo rate-limit (~5ms entre emits) |
+| 4 | 4 | `elapsed_ms` | uint32 BE |
+| 8 | 1 | `status` | 0 = ok, 2 = erro |
+
+> Se `frames_dropped` >> `frames_emitted`, o canal está mais barulhento
+> que o BLE consegue transmitir. Estratégias: filtrar mais (`mgmt` só) ou
+> usar `bssid` pra reduzir volume.
+
 ### Faixas reservadas de `msg_type`
 
 | Faixa | Categoria |
@@ -545,3 +578,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 1 | Heartbeat bidirecional: TLV `HEARTBEAT 0x00` emitido pelo firmware a cada 5s no `stream` (uptime + free SRAM/PSRAM). App detecta liveness sem polling. Reverso (app→firmware) continua via `ping`. |
 | 2026-05-05 | Phase 2 | `wifi_scan` ganha args opcionais `mode` (`active`/`passive`) e `channel` (0/1–13). TLV `WIFI_SCAN_AP 0x10` ganha 1 byte `flags` no final (hidden, WPS, phy_11b, phy_11n) — backward-compat (apps antigos que param em ssid não veem o byte). |
 | 2026-05-05 | Phase 2 | `ble_scan` ganha arg `mode` (`active`/`passive`). TLV `BLE_SCAN_DEV 0x12` ganha 1 byte `tracker` no final classificando AirTag/SmartTag/Tile/Chipolo — backward-compat. |
+| 2026-05-05 | Phase 2 | Comandos `pcap_start` / `pcap_stop`: streaming de frames 802.11 sem storage local. Filtros mgmt/data/ctrl + opcional BSSID. Rate-limit interno ~5ms (~200 fps). Novos TLVs `PCAP_FRAME 0x40` (ts + orig_len + flags + frame até 236B) e `PCAP_DONE 0x41` (emitted/dropped/elapsed). Faixa 0x40–0x4F (captura/dados) inaugurada. |

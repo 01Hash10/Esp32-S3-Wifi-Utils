@@ -702,3 +702,205 @@ esp_err_t sniff_wifi_pmkid_stop(void)
     s_stop = true;
     return ESP_OK;
 }
+
+// ----------------------------------------------------------------------
+// PCAP streaming (sem storage local — direto pro app via TLV)
+// ----------------------------------------------------------------------
+
+#define PCAP_TLV_HDR        7   // ts(4) + orig_len(2) + flags(1)
+#define PCAP_FRAME_MAX      (TLV_MAX_FRAME_SIZE - 4 - PCAP_TLV_HDR) // ~236
+#define PCAP_RATE_LIMIT_US  5000  // 5ms = ~200 frames/s teóricos
+
+typedef struct {
+    uint8_t  channel;
+    uint8_t  filter;
+    bool     has_bssid;
+    uint8_t  bssid[6];
+    uint16_t duration_sec;
+} pcap_ctx_t;
+
+static volatile uint8_t  s_pcap_filter = 0;
+static volatile bool     s_pcap_has_bssid = false;
+static uint8_t           s_pcap_bssid[6];
+static volatile uint16_t s_pcap_emitted = 0;
+static volatile uint16_t s_pcap_dropped = 0;
+static volatile int64_t  s_pcap_start_us = 0;
+static volatile int64_t  s_pcap_last_emit_us = 0;
+
+static void emit_pcap_done(uint16_t emitted, uint16_t dropped,
+                            uint32_t elapsed_ms, uint8_t status)
+{
+    uint8_t payload[9];
+    payload[0] = (uint8_t)(emitted >> 8);
+    payload[1] = (uint8_t)(emitted & 0xFF);
+    payload[2] = (uint8_t)(dropped >> 8);
+    payload[3] = (uint8_t)(dropped & 0xFF);
+    payload[4] = (uint8_t)(elapsed_ms >> 24);
+    payload[5] = (uint8_t)(elapsed_ms >> 16);
+    payload[6] = (uint8_t)(elapsed_ms >> 8);
+    payload[7] = (uint8_t)(elapsed_ms & 0xFF);
+    payload[8] = status;
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_PCAP_DONE, s_seq++,
+                           payload, sizeof(payload));
+    if (total > 0) transport_ble_send_stream(out, (size_t)total);
+}
+
+static void promisc_cb_pcap(void *buf, wifi_promiscuous_pkt_type_t type)
+{
+    uint8_t mask = 0;
+    switch (type) {
+    case WIFI_PKT_MGMT: mask = SNIFF_PCAP_FILTER_MGMT; break;
+    case WIFI_PKT_DATA: mask = SNIFF_PCAP_FILTER_DATA; break;
+    case WIFI_PKT_CTRL: mask = SNIFF_PCAP_FILTER_CTRL; break;
+    default: return;
+    }
+    if (!(s_pcap_filter & mask)) return;
+
+    const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
+    const uint8_t *p = pkt->payload;
+    uint16_t len = pkt->rx_ctrl.sig_len;
+    if (len < 16) return; // RTS = 16 bytes (menor frame válido aqui)
+
+    if (s_pcap_has_bssid) {
+        bool match = false;
+        if (len >= 22) {
+            const uint8_t *t = (const uint8_t *)s_pcap_bssid;
+            if (memcmp(&p[4],  t, 6) == 0 ||
+                memcmp(&p[10], t, 6) == 0 ||
+                memcmp(&p[16], t, 6) == 0) match = true;
+        }
+        if (!match) return;
+    }
+
+    int64_t now = esp_timer_get_time();
+    if (now - s_pcap_last_emit_us < PCAP_RATE_LIMIT_US) {
+        s_pcap_dropped++;
+        return;
+    }
+    s_pcap_last_emit_us = now;
+
+    uint16_t orig_len = (len >= 4) ? (len - 4) : len; // tira FCS
+    uint16_t emit_len = orig_len;
+    uint8_t flags = 0;
+    if (emit_len > PCAP_FRAME_MAX) {
+        emit_len = PCAP_FRAME_MAX;
+        flags |= 0x01; // truncated
+    }
+
+    int64_t rel = now - s_pcap_start_us;
+    if (rel < 0) rel = 0;
+    uint32_t ts_us = (uint32_t)rel;
+
+    uint8_t payload[PCAP_TLV_HDR + PCAP_FRAME_MAX];
+    payload[0] = (uint8_t)(ts_us >> 24);
+    payload[1] = (uint8_t)(ts_us >> 16);
+    payload[2] = (uint8_t)(ts_us >> 8);
+    payload[3] = (uint8_t)(ts_us & 0xFF);
+    payload[4] = (uint8_t)(orig_len >> 8);
+    payload[5] = (uint8_t)(orig_len & 0xFF);
+    payload[6] = flags;
+    memcpy(&payload[PCAP_TLV_HDR], p, emit_len);
+
+    uint8_t out[TLV_MAX_FRAME_SIZE];
+    int total = tlv_encode(out, sizeof(out),
+                           TLV_MSG_PCAP_FRAME, s_seq++,
+                           payload, PCAP_TLV_HDR + emit_len);
+    if (total > 0) {
+        transport_ble_send_stream(out, (size_t)total);
+        s_pcap_emitted++;
+    }
+}
+
+static void pcap_task(void *arg)
+{
+    pcap_ctx_t *ctx = (pcap_ctx_t *)arg;
+    int64_t start_us = esp_timer_get_time();
+    int64_t deadline_us = start_us + (int64_t)ctx->duration_sec * 1000000LL;
+
+    s_pcap_filter   = ctx->filter;
+    s_pcap_has_bssid = ctx->has_bssid;
+    if (ctx->has_bssid) memcpy(s_pcap_bssid, ctx->bssid, 6);
+    s_pcap_emitted = 0;
+    s_pcap_dropped = 0;
+    s_pcap_start_us = start_us;
+    s_pcap_last_emit_us = 0;
+
+    // Filtro do hardware: combina os tipos solicitados.
+    uint32_t hw_mask = 0;
+    if (ctx->filter & SNIFF_PCAP_FILTER_MGMT) hw_mask |= WIFI_PROMIS_FILTER_MASK_MGMT;
+    if (ctx->filter & SNIFF_PCAP_FILTER_DATA) hw_mask |= WIFI_PROMIS_FILTER_MASK_DATA;
+    if (ctx->filter & SNIFF_PCAP_FILTER_CTRL) hw_mask |= WIFI_PROMIS_FILTER_MASK_CTRL;
+    wifi_promiscuous_filter_t filter = { .filter_mask = hw_mask };
+    esp_wifi_set_promiscuous_filter(&filter);
+
+    esp_err_t err = esp_wifi_set_promiscuous(true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set_promiscuous rc=%s", esp_err_to_name(err));
+        emit_pcap_done(0, 0, 0, 2);
+        goto cleanup;
+    }
+    esp_wifi_set_promiscuous_rx_cb(&promisc_cb_pcap);
+    esp_wifi_set_channel(ctx->channel, WIFI_SECOND_CHAN_NONE);
+
+    while (!s_stop && esp_timer_get_time() < deadline_us) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    esp_wifi_set_promiscuous(false);
+
+    uint32_t elapsed = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+    emit_pcap_done(s_pcap_emitted, s_pcap_dropped, elapsed, 0);
+    ESP_LOGI(TAG, "pcap done: emitted=%u dropped=%u in %u ms",
+             (unsigned)s_pcap_emitted, (unsigned)s_pcap_dropped,
+             (unsigned)elapsed);
+
+cleanup:
+    free(ctx);
+    s_stop = false;
+    s_task = NULL;
+    s_mode = SNIFF_MODE_IDLE;
+    vTaskDelete(NULL);
+}
+
+esp_err_t sniff_wifi_pcap_start(uint8_t channel, uint8_t filter,
+                                 const uint8_t *bssid,
+                                 uint16_t duration_sec)
+{
+    if (s_mode != SNIFF_MODE_IDLE) return ESP_ERR_INVALID_STATE;
+    if (channel == 0 || channel > 13) return ESP_ERR_INVALID_ARG;
+    if ((filter & SNIFF_PCAP_FILTER_ALL) == 0) return ESP_ERR_INVALID_ARG;
+    if (duration_sec == 0)   duration_sec = 60;
+    if (duration_sec > 300)  duration_sec = 300;
+
+    pcap_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return ESP_ERR_NO_MEM;
+    ctx->channel = channel;
+    ctx->filter = filter & SNIFF_PCAP_FILTER_ALL;
+    ctx->duration_sec = duration_sec;
+    if (bssid) {
+        memcpy(ctx->bssid, bssid, 6);
+        ctx->has_bssid = true;
+    }
+
+    s_mode = SNIFF_MODE_PCAP;
+    s_stop = false;
+    if (xTaskCreate(pcap_task, "pcap_stream", 4096, ctx, 5, &s_task) != pdPASS) {
+        free(ctx);
+        s_mode = SNIFF_MODE_IDLE;
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "pcap_start: ch=%u filter=0x%02x bssid=%s dur=%us",
+             channel, filter, ctx->has_bssid ? "yes" : "no",
+             (unsigned)duration_sec);
+    return ESP_OK;
+}
+
+esp_err_t sniff_wifi_pcap_stop(void)
+{
+    if (s_mode != SNIFF_MODE_PCAP) return ESP_ERR_INVALID_STATE;
+    s_stop = true;
+    return ESP_OK;
+}
