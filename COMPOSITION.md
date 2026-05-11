@@ -19,6 +19,7 @@ focando em:
 | `scan_wifi` | `s_busy` | Todo o componente | IDF `esp_wifi_scan_start` não suporta scans concorrentes |
 | `scan_ble` | `s_busy` | Todo o componente | NimBLE `ble_gap_disc` é singleton |
 | `hacking_wifi` | `s_busy` | deauth + beacon_flood + channel_jam | Concorrência em `esp_wifi_set_channel` + TX queue compartilhada |
+| `hacking_wifi` | promiscuous global | `inject_begin`/`inject_end` em deauth/beacon/jam/storm | Driver Wi-Fi só aceita TX de raw mgmt em modo promiscuous; `inject_end()` desliga ao terminar — **afeta `sniff_wifi` e `defense_start` em paralelo**. Ver seção 5. |
 | `hacking_ble` | `s_busy` | apple/samsung/google/multi spam | NimBLE `ble_gap_adv_set_data` é singleton (1 adv por vez) |
 | `attack_lan` | `s_cut.stop` | arp_cut | 2 poison loops sobrescreveriam o cache |
 | `attack_lan` | `s_thr.stop` | arp_throttle | Idem; e cycle on/off conflita com cut contínuo |
@@ -67,10 +68,16 @@ Demais cross-component são por **canal de rádio** (não por busy flag):
 - **[b]** STA conectada bloqueia o canal no AP da rede. Iniciar
   `sniff_wifi`/`scan_wifi`/`hacking_wifi` em outro canal **derruba a
   conexão STA** (e portanto o `arp_cut`/`arp_throttle` que depende dela).
-- **[c]** sniff_wifi.pcap + hacking_wifi.deauth no mesmo canal: ambos
+- **[c]** sniff_wifi + hacking_wifi no mesmo canal: ambos
   recebem/transmitem no mesmo set_channel. Fundamental pra
-  `wpa_capture_kick`. Como `s_busy` é per-componente, JÁ funciona — mas
-  app precisa garantir mesmo canal.
+  `wpa_capture_kick` / `pmkid_capture_kick`. Como `s_busy` é per-componente,
+  a flag por si só não bloqueia — mas desde commit `028e2e2` (2026-05-08)
+  hacking_wifi liga **e desliga** promiscuous global em `inject_begin/end`.
+  Isso quebra `sniff_wifi.s_mode` em paralelo: após o deauth retornar,
+  callback do sniffer fica registrado mas o driver para de entregar
+  frames. **Não é "JÁ funciona"** mais — ver seção 5 pra detalhes de
+  por que as macros ainda funcionam (timing) e o que NÃO funciona
+  (sniff longo após deauth curto).
 - **[d]** evil_twin (modo APSTA) e STA conectada: incompatível porque
   STA precisa estar livre do AP corrente pra modo APSTA não conflitar
   com canal do AP do twin. Sempre `wifi_disconnect` antes do `evil_twin_start`.
@@ -267,7 +274,96 @@ Ordem de implementação prevista:
 
 ---
 
-## 5. Rules of thumb
+## 5. Caveat do promiscuous em hacking_wifi (desde 2026-05-08)
+
+A partir do commit `028e2e2`, **`deauth` / `beacon_flood` / `channel_jam`
+/ `deauth_storm`** entram numa fase mandatória antes do TX:
+
+```c
+inject_begin(channel):
+    esp_wifi_set_promiscuous(true)
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE)
+
+[ ...loop de TX raw com esp_wifi_80211_tx... ]
+
+inject_end():
+    esp_wifi_set_promiscuous(false)
+```
+
+Sem essa fase o driver Wi-Fi do IDF rejeita mgmt frames forjados com
+`unsupport frame type` + `ESP_ERR_INVALID_ARG` — o filter só é bypassado
+quando o STA está em modo raw. Combinada com o override de
+`ieee80211_raw_frame_sanity_check` (ver `METHODS.md` seção `deauth`), é
+o que torna o TX **efetivo de fato**.
+
+### Quem é afetado
+
+`esp_wifi_set_promiscuous` é **estado global** do driver. `inject_end`
+desliga incondicionalmente. Componentes que dependem de promiscuous on
+e estão rodando em paralelo perdem callbacks a partir desse momento:
+
+| Componente em paralelo | Estado depois do `inject_end` |
+|---|---|
+| `sniff_wifi` (probe / eapol / pmkid / pcap / karma) | Callback registrado mas driver não entrega frames → fica silencioso |
+| `defense_start` (todos os detectores rodam em promiscuous mgmt) | Idem, alertas param |
+| `evil_twin` (APSTA + DHCP) | OK — independe de promiscuous (Soft-AP) |
+| `attack_lan` (arp_cut/throttle/scan) | OK — opera em STA assoc, sem promiscuous |
+| BLE (scan/hack) | OK — rádio separado |
+
+### Por que as macros existentes ainda funcionam
+
+- **`wpa_capture_kick`** = `wpa_capture` + 150ms delay + `deauth(broadcast)`.
+  - `wpa_capture` (sniff_wifi.s_mode=eapol) liga promiscuous via sniff_wifi.
+  - Após 150ms, `deauth_task` faz `inject_begin` (promiscuous já on → noop)
+    e roda ~`count×3ms = 300ms` com `count=100`. Aí `inject_end` desliga
+    promiscuous → **wpa_capture fica cego pelo resto do `duration_sec`**
+    (default 90s). Frames EAPOL emitidos durante os 300ms do deauth
+    ainda saem (sniffer ativo nesse intervalo); depois disso só M1/M2/M3/M4
+    que chegarem no exato momento do deauth.
+  - Na prática **funciona o suficiente** porque o deauth provoca reassoc
+    imediato, e o handshake completo ocorre nos primeiros ms após o
+    último frame de deauth — antes do `inject_end`. Mas se o cliente
+    demora pra reassociar (rede saturada, sinal fraco), perde-se o
+    handshake. Workaround: aumentar `count` pra estender a janela de
+    captura ativa (count=200 → ~600ms de janela).
+
+- **`pmkid_capture_kick`** — análogo, mas `deauth_count` default = 10
+  → deauth dura só ~30ms. PMKID emerge no M1 (primeiro pacote pós-deauth)
+  que costuma chegar nesse intervalo. Se não chegar → captura morta.
+
+- **`evil_twin_kick`** — evil_twin não usa promiscuous (é SoftAP), então
+  o `inject_end` do deauth opcional não afeta. 100% seguro.
+
+- **`deauth_storm`** — uma task só, sem componente em paralelo esperado.
+
+### Casos que NÃO funcionam mais
+
+- `wpa_capture` longo (90s+) + `deauth` separado disparado pelo app no meio:
+  funcionava antes (deauth pegava emprestado o promiscuous do sniff),
+  agora **mata o sniff**. Use `wpa_capture_kick` ou aceite que só vai
+  pegar o handshake imediato.
+- `defense_start` rodando + `deauth`/`beacon_flood` no mesmo boot:
+  **defense para de detectar** após o primeiro TX. Sequência correta:
+  rodar TX → reiniciar defense.
+
+### Workaround para "sticky promiscuous"
+
+Quem precisar de sniff longo + TX raw deveria fazer um wrapper externo:
+
+```c
+esp_wifi_set_promiscuous(true);       // pega o estado pra mim
+hacking_wifi_deauth(...);              // inject_begin: noop, inject_end: off
+esp_wifi_set_promiscuous(true);       // ressuscita
+```
+
+Não está implementado — `inject_end` é incondicional. Pra fixar
+corretamente, mover o pareamento set/unset pra dentro de `hacking_wifi`
+com refcount, ou expor uma flag `keep_promisc`. Fica como tarefa de
+retomada.
+
+---
+
+## 6. Rules of thumb
 
 - **Mesmo canal**: features que TX/RX no rádio WiFi têm que estar no
   mesmo canal pra funcionarem em paralelo. Se canais diferentes, o

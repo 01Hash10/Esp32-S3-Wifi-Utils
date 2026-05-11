@@ -45,7 +45,7 @@ Sequência completa do app Flutter:
 6. **Validar conexão**: enviar `{"cmd":"hello","seq":1}` em `cmd_ctrl`.
    Resposta esperada via Notify do mesmo `cmd_ctrl`:
    ```json
-   {"resp":"hello","seq":1,"fw":"...","idf":"5.4.0","chip":"esp32s3","cores":2,"rev":2}
+   {"resp":"hello","seq":1,"fw":"...","idf":"5.1.2","chip":"esp32s3","cores":2,"rev":2}
    ```
 
 > **Nota**: o protocolo JSON em `cmd_ctrl` envia uma mensagem por Write
@@ -107,7 +107,7 @@ Frame:
 | `wifi_scan` | `seq`, `mode` (opcional, `"active"`/`"passive"`, default `"active"`), `channel` (opcional, 0=todos / 1–13=specific, default 0) | `{"resp":"wifi_scan","seq":N,"status":"started"}` (ack imediato; resultados via `stream`). Passivo é silencioso (sem probe req) mas demora ~360ms por canal. | 2 |
 | `ble_scan` | `seq`, `mode` (opcional, `"passive"`/`"active"`, default `"passive"`), `duration_sec` (opcional, default 10, max 599; 0 = até `ble_scan_stop`) | `{"resp":"ble_scan","seq":N,"status":"started"}`. Active envia scan_request → captura scan_response (nome completo, etc). | 2 |
 | `ble_scan_stop` | `seq` | `{"resp":"ble_scan_stop","seq":N,"status":"started"}` (encerra scan em andamento) | 2 |
-| `deauth` | `seq`, `bssid` (string), `target` (string, opcional, default broadcast), `channel` (1–14), `count` (opcional, default 10, max 1000), `reason` (opcional, default 7) | `{"resp":"deauth","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_DEAUTH_DONE` no `stream`). Roda em task assíncrona pra não bloquear BLE. | 3 |
+| `deauth` | `seq`, `bssid` (string), `target` (string, opcional, default broadcast), `channel` (1–14), `count` (opcional, default 10, max 1000), `reason` (opcional, default 7) | `{"resp":"deauth","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_DEAUTH_DONE` no `stream`). Roda em task assíncrona pra não bloquear BLE. Internamente liga promiscuous (`inject_begin`) e desliga ao terminar (`inject_end`) — incompatível com `sniff_wifi`/`defense_start` em paralelo (ver `COMPOSITION.md` seção 5). Logs adicionais no início da task: target/BSSID/canal/count/reason + warnings se target=broadcast ou PMF detectado. **Recomendação prática** (não default): passar `count: 100` e `reason: 4` (inactivity) — `count=10` raramente derruba clients modernos consistentemente, e reason 7 ("class3 nonassoc") é mais ignorado que reason 4 por Android 12+/iOS 14+. | 3 |
 | `beacon_flood` | `seq`, `channel` (1–14), `ssids` (array de strings, 1–32, cada uma ≤32 bytes), `cycles` (opcional, default 50, max 200) | `{"resp":"beacon_flood","seq":N,"status":"started"}` (ack imediato; resultado final via TLV `HACK_BEACON_DONE` no `stream`). Async. | 3 |
 | `ble_spam_apple` | `seq`, `cycles` (opcional, default 50, max 500) | `{"resp":"ble_spam_apple","seq":N,"status":"started"}` (ack; resultado final via TLV `HACK_BLE_SPAM_DONE` em `stream`, vendor=0). Pausa adv do GATT. Cada cycle ~100ms. | 4 |
 | `ble_spam_samsung` | `seq`, `cycles` (default 50, max 500) | Idem, vendor=1 no DONE. Galaxy Buds popups em phones Samsung. | 4 |
@@ -208,7 +208,7 @@ Toda resposta de erro segue o schema:
 // app → device
 {"cmd":"hello","seq":1}
 // device → app
-{"resp":"hello","seq":1,"fw":"1","idf":"5.4.0","chip":"esp32s3","cores":2,"rev":2}
+{"resp":"hello","seq":1,"fw":"1","idf":"5.1.2","chip":"esp32s3","cores":2,"rev":2}
 
 // app → device
 {"cmd":"status","seq":7}
@@ -853,3 +853,4 @@ Future<void> connectAndPing() async {
 | 2026-05-05 | Phase 3.5 | 4 macros novos no command_router (sem novos TLVs — cada macro reusa TLVs das primitivas que orquestra): `wpa_capture_kick` (wpa_capture + deauth), `pmkid_capture_kick` (pmkid_capture + deauth), `evil_twin_kick` (evil_twin + opcional deauth no AP legítimo), `recon_full` (wifi_scan + ble_scan + opcional lan_scan paralelos). Karma_then_twin (decisão automática) ainda pendente — exige callback API mais refinada. |
 | 2026-05-05 | Phase 3.5 | +4 macros: `karma_then_twin` (karma agrega via hook weak no sniff_wifi, decide top SSID, sobe twin), `deauth_storm` (single task com deauth burst + RTS jam intercalados — nova função `hacking_wifi_deauth_storm`), `mitm_capture` (arp_cut drop + pcap filter — modo "weak" sem forwarding real), `tracker_hunt` (ble_scan ativo longo — agregação multi-scan ainda lado-app). Phase 3.5 macros 100% — falta só playbook engine. |
 | 2026-05-05 | Phase 3.5 | Comandos `playbook_run` / `playbook_stop`: engine declarativo JSON com 4 step types (cmd/wait_ms/wait_event/set). `cmd` despacha pelo command_router localmente. `wait_event` usa hook weak `playbook_hook_tlv` em transport_ble pra esperar TLV específico. `set` armazena variáveis (até 8) com substituição `$var` em args subsequentes. Aceita `steps` inline OU `profile` (carrega do NVS via persist). Novos TLVs `PLAYBOOK_STEP_DONE 0x28` e `PLAYBOOK_DONE 0x29`. Cap 32 steps, 4096 bytes JSON, 3 erros consecutivos = abort. |
+| 2026-05-08 | Phase 3 | **Downgrade IDF 5.4 → 5.1.2** (`platform = espressif32 @ 6.5.0`) + bypass de `ieee80211_raw_frame_sanity_check` via `-Wl,--weaken-symbol` (novo `components/hacking_wifi/wsl_bypasser.c`). Sem isso `deauth`/`beacon_flood`/`channel_jam`/`deauth_storm` retornavam ESP_OK mas **não injetavam** mgmt frames (filter `unsupport frame type 0c0` de IDF 5.2+ dropa antes da função wrappada). Hello passa a reportar `idf:"5.1.2"`. Mudança correlata interna: `hacking_wifi.c` liga/desliga promiscuous em `inject_begin/inject_end` (impacta composição com sniff/defense — ver `COMPOSITION.md` seção 5). **Defaults do `deauth` no protocolo permanecem `count=10`/`reason=7`** — o commit alterou os defaults de `hacking_wifi_deauth(...)` pra 100/4 mas o `command_router` continua defaultando 10/7 antes de chamar a função, então os novos defaults internos só ativariam se um caller in-firmware passar 0 (inalcançável via JSON). Pra app: melhor passar `count: 100, reason: 4` explicitamente — ver row do `deauth` no catálogo. |

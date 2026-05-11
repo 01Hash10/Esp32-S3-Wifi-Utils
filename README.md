@@ -44,7 +44,10 @@ discussão de mitigações.
 ## Stack
 
 - PlatformIO + framework `espidf`
-- ESP-IDF 5.4.0 (via `platform = espressif32 @ 6.10.0`)
+- ESP-IDF 5.1.2 (via `platform = espressif32 @ 6.5.0`). **Não atualizar
+  sem ler `CLAUDE.md`**: o bypass de `ieee80211_raw_frame_sanity_check`
+  necessário pra `deauth`/`beacon_flood`/`channel_jam` injetarem mgmt
+  frames depende dessa versão (5.2+ adicionou filter mais cedo no TX path).
 - esptool 5.2.0 (atualizada via pip — versão default 4.5.1 não funciona com este chip)
 - Linguagem: C
 
@@ -133,10 +136,10 @@ pio run -t menuconfig
 Logs no monitor a cada 5s:
 
 ```
-Free SRAM     : ~332 KB (320-340 KB)
-Free PSRAM    : ~8.00 MB
-Total PSRAM   : 8388608 bytes
-ESP-IDF       : 5.4.0
+Free SRAM     : ~120 KB
+Free PSRAM    : ~7.92 MB (≈ 8302984 bytes)
+Total PSRAM   : 8370428 bytes
+ESP-IDF       : 5.1.2
 ```
 
 ## Troubleshooting
@@ -194,7 +197,7 @@ Resumo:
 
 ## Arquitetura (decisões fechadas)
 
-- **Firmware**: ESP-IDF 5.4 puro, C
+- **Firmware**: ESP-IDF 5.1.2 puro, C (versão pinada por causa do bypass de mgmt frame injection — ver `CLAUDE.md`)
 - **App**: Flutter (`flutter_blue_plus`)
 - **Transporte**: BLE GATT
 - **Protocolo híbrido**:

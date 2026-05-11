@@ -305,11 +305,11 @@ captura M1+M2 do handshake e calcula o PIN sem mais round-trips com o AP.
 Para fazer isso no ESP32 precisaríamos extrair os campos crus do M2
 (PKr = chave pública DH do registrar, N1 = nonce, E-Hash1, E-Hash2).
 
-**Limitação técnica do ESP-IDF 5.4**: a API pública (`esp_wps.h`) só
-expõe enable/start/disable e eventos high-level (success com PSK,
-failed com reason, timeout). Os campos crus do M2 ficam internos no
-`wpa_supplicant/src/wps/` — sem callback público pra extrair. Patchear
-o IDF é frágil (quebra updates).
+**Limitação técnica do ESP-IDF (5.1.2, mantida em 5.2+)**: a API pública
+(`esp_wps.h`) só expõe enable/start/disable e eventos high-level
+(success com PSK, failed com reason, timeout). Os campos crus do M2
+ficam internos no `wpa_supplicant/src/wps/` — sem callback público pra
+extrair. Patchear o IDF é frágil (quebra updates).
 
 **Workaround pra Pixie Dust offline**:
 1. Sniffar a troca WPS entre o AP alvo e algum cliente legítimo:
@@ -960,10 +960,13 @@ s_busy global do hacking_wifi (deauth, beacon_flood, channel_jam são
 mutex entre si).
 
 Pipeline interno:
-1. set_channel
+1. `inject_begin(channel)` — promiscuous on + set_channel (bypass do
+   filter de mgmt frames, ver seção `deauth`)
 2. Burst inicial de `deauth_count` deauths (3ms entre cada)
 3. Loop até `jam_seconds`: 30 RTS frames (25ms cada, NAV lock) + 5 deauths
-4. Final logado
+4. `inject_end()` — promiscuous off (mesmo caveat de afetar sniff/defense
+   em paralelo)
+5. Final logado
 
 Args: `bssid`, `target?` (default broadcast), `channel`, `deauth_count`
 (10–500, default 50), `jam_seconds` (5–60, default 15).
@@ -1361,34 +1364,105 @@ clients a se desconectarem do AP. Cliente reassocia logo em seguida —
   - addr2 = source = BSSID do AP (forjado)
   - addr3 = BSSID
   - sequence `0x0000`
-  - reason code (LE) — 7 = "Class 3 frame received from nonassociated STA"
-- Cliente recebe e protocol-aware desconecta sem questionar (até PMF/802.11w
-  ser exigido — em redes domésticas geralmente não é).
+  - reason code (LE) — protocolo permanece com default `7` ("class 3
+    frame from nonassociated STA"). **Recomendação prática**: passar
+    `reason=4` ("inactivity") explicitamente — mais respeitado por
+    Android 12+/iOS 14+. O commit `028e2e2` mudou o default interno de
+    `hacking_wifi_deauth()` pra 4, mas o `command_router` defaulta pra 7
+    antes de chamar a função, então o novo default só ativa pra callers
+    in-firmware que passam 0 (inalcançável pelo app — fix pendente).
+- Cliente recebe e protocol-aware desconecta sem questionar — exceto se
+  o AP exigir PMF (802.11w), aí frames não-assinados são dropados.
+
+**Bypass do filter de mgmt frame TX** (essencial — sem isso o comando é no-op):
+
+O blob `libnet80211.a` do ESP-IDF tem uma função interna
+`ieee80211_raw_frame_sanity_check(...)` que valida frames passados a
+`esp_wifi_80211_tx` antes de aceitar. Para frames mgmt forjados (deauth,
+beacon, etc.) ela retorna -1 → driver descarta silenciosamente
+(`esp_wifi_80211_tx` retorna ESP_OK mesmo assim).
+
+Bypass em 3 camadas (commit `028e2e2`, 2026-05-08):
+
+1. **`components/hacking_wifi/wsl_bypasser.c`** — define
+   `__wrap_ieee80211_raw_frame_sanity_check` retornando sempre 0.
+2. **`platformio.ini > build_flags`** — `-Wl,--weaken-symbol=ieee80211_raw_frame_sanity_check`
+   força o linker a usar nossa versão em vez da do `libnet80211.a`
+   (mais simples que `--wrap` que falhava silenciosamente em IDF 5.4).
+3. **IDF pinada em 5.1.2** (`espressif32 @ 6.5.0`) — em 5.2+ a Espressif
+   adicionou um filter mais cedo no TX path (mensagem `unsupport frame
+   type 0c0`) que roda ANTES da função wrappada. Sem o downgrade,
+   bypass não alcança.
+
+Origem do truque: `GANESH-ICMC/esp32-deauther` → `risinek/esp32-wifi-penetration-tool`.
 
 **Implementação** (`hacking_wifi.c`):
-- Pre-build template de 26 bytes em static const.
-- Async via FreeRTOS task pra não bloquear BLE host:
-  - `xTaskCreate(deauth_task, ...)` retorna ack `started` ao app.
-  - Task: set channel, copia template, sobrescreve addr1/addr2/addr3/reason,
-    loop `esp_wifi_80211_tx(WIFI_IF_STA, frame, 26, false)` × count.
-  - 3ms delay entre frames pra não saturar.
-  - Ao final emite TLV `HACK_DEAUTH_DONE 0x20` no stream.
+- Pre-build template de 26 bytes em `static const s_deauth_template`.
+- `hacking_wifi_deauth(...)` valida args, gateia em `s_busy`, defaulta
+  `count=100` / `reason=4` quando recebe 0 (atualmente dead code via
+  JSON — ver nota acima), faz `calloc` do `deauth_job_t` e dispara
+  task com `xTaskCreate(deauth_task, "deauth", 4096, ...)`. Retorna ESP_OK
+  → command_router responde ack `started` ao app.
+- `deauth_task`:
+  1. Log `deauth start: target=... bssid=... ch=N count=N reason=N`
+     (diagnóstico — antes do bypass não dava pra correlacionar app→fw).
+  2. Warn se `target=ff:ff:ff:ff:ff:ff` (clients modernos podem ignorar
+     broadcast; recomenda MAC específico do STA).
+  3. Warn lembrando que APs com PMF/802.11w dropam deauth não assinado.
+  4. **`inject_begin(channel)`** — liga `esp_wifi_set_promiscuous(true)`
+     (driver só aceita TX de mgmt raw em modo promiscuous) e troca canal
+     com `esp_wifi_set_channel`. Sem promiscuous, `esp_wifi_80211_tx` loga
+     `unsupport frame type` + `ESP_ERR_INVALID_ARG` e dropa.
+  5. Confirma canal real via `esp_wifi_get_channel` — se diferente do
+     pedido, emite warning `channel mismatch: requested=N actual=M`.
+     `set_channel` pode falhar silente se STA associada ou scan ativo.
+  6. Loop por `count`: copia template, sobrescreve addr1/addr2/addr3 e
+     reason code, `esp_wifi_80211_tx(WIFI_IF_STA, frame, 26, false)`,
+     `vTaskDelay(3ms)` entre frames.
+  7. Log de erro `tx rc=... (kernel filtering deauth?)` se TX falhar.
+  8. **`inject_end()`** — `esp_wifi_set_promiscuous(false)` — desliga
+     promiscuous global. ⚠ **Cuidado**: isso desabilita `sniff_wifi`
+     (probe/pcap/wpa_capture/karma) e `defense_start` se rodando em
+     paralelo. Ver `COMPOSITION.md` seção 5.
+  9. Log final `deauth N/M on ch=X reason=Y` + emite TLV
+     `HACK_DEAUTH_DONE 0x20` no stream.
 
 **Fluxo**:
 ```
-App ──{"cmd":"deauth","bssid":"AA:..","channel":6,"count":50}──→ ESP
+App ──{"cmd":"deauth","bssid":"AA:..","target":"BB:..","channel":6,"count":50,"reason":4}──→ ESP
 ESP ──{"resp":"deauth","status":"started"}──→ App  (ack)
 
-  ESP radio (ch6) ──deauth frame×50──→ ar
-                                         ↓
-                              client(s) desconectam
-                              
-ESP ──TLV[0x20] DEAUTH_DONE (sent=50, requested=50, ch=6, reason=7)──→ App
+  hacking_wifi_deauth() → xTaskCreate(deauth_task)
+    log target/bssid/ch/count/reason
+    warn se broadcast / lembrete PMF
+    inject_begin(ch=6):
+        esp_wifi_set_promiscuous(true)
+        esp_wifi_set_channel(6)
+    confirm channel real via get_channel
+    loop count×:
+        esp_wifi_80211_tx(STA, deauth_frame, 26)  ──→ ar ch6
+                                                       ↓
+                                              cliente(s) desassociam
+        vTaskDelay(3ms)
+    inject_end():
+        esp_wifi_set_promiscuous(false)
+    log "deauth N/M"
+
+ESP ──TLV[0x20] DEAUTH_DONE (sent=N, requested=count, ch=6, reason=4)──→ App
 ```
 
-**Limitações**: o blob libnet80211 do IDF 5.4 filtra alguns mgmt frames —
-~10–20 frames/chamada passam. APs com PMF (802.11w) ignoram deauth não
-autenticado. Validação em hardware pendente (precisa cliente 2.4GHz separado).
+**Limitações**:
+- APs com PMF (802.11w MFP=Required) ignoram deauth não-assinado — não
+  há contorno sem hardware/blob diferente.
+- Validação visual em cliente 2.4GHz separado fica como retomada (sessão
+  de 2026-05-08 viu serial corrompida durante bursts; bypass está no
+  lugar mas confirmação end-to-end pendente).
+- IDF pinada em 5.1.2 — qualquer upgrade pra 5.2+ quebra silenciosamente
+  (`esp_wifi_80211_tx` continua retornando OK mas frame não vai pro ar).
+- `inject_end()` desliga promiscuous incondicionalmente — incompatível
+  com sniff/defense em paralelo. Macros `wpa_capture_kick` e
+  `pmkid_capture_kick` rodam sniff ANTES do deauth e dependem desse
+  comportamento; ver `COMPOSITION.md` seção 5 pra detalhes.
 
 ---
 
@@ -1410,6 +1484,10 @@ aparecer redes fake no scanner do alvo. Visual / DoS de UI.
   - Monta frame em buffer (max ~94B) com IEs apropriadas pra parecer
     11g clean.
   - `esp_wifi_80211_tx`, 10ms delay.
+- Usa o mesmo `inject_begin(channel)` / `inject_end()` do `deauth` — liga
+  promiscuous antes do TX (caso contrário o driver dropa mgmt frames com
+  `unsupport frame type`) e desliga ao terminar. **Mesmo caveat** sobre
+  promiscuous global afetar `sniff_wifi`/`defense` em paralelo.
 - Final: TLV `HACK_BEACON_DONE 0x21`.
 
 **Fluxo**: similar ao deauth. Frames vão pro ar; scanners mostram fake APs.
@@ -1442,6 +1520,10 @@ conseguem TX/RX significativo enquanto rodando — DoS de airtime.
 
 **Implementação** (`hacking_wifi.c`):
 - Async via task. Cap de 120s por sessão (não fritar a placa).
+- `inject_begin(channel)` no início — liga promiscuous e troca canal
+  (RTS, sendo control frame, na prática não exige o bypass de mgmt, mas
+  o helper unifica o setup). `inject_end()` desliga promiscuous ao
+  terminar — mesmo caveat com sniff/defense em paralelo.
 - Loop tight: copia template, `esp_wifi_80211_tx`, `vTaskDelay(25ms)`.
 - Final: TLV `HACK_JAM_DONE 0x23` com sent + duration_sec + channel.
 

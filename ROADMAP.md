@@ -5,7 +5,7 @@ ou removidos ao longo do projeto.
 
 ## Decisões de arquitetura
 
-- **Firmware**: ESP-IDF 5.4 puro, C
+- **Firmware**: ESP-IDF 5.1.2 puro, C (versão pinada — necessária pro bypass de `ieee80211_raw_frame_sanity_check`; ver `CLAUDE.md`)
 - **App**: Flutter (`flutter_blue_plus`)
 - **Transporte**: BLE GATT (NUS-style, custom service)
 - **Protocolo (híbrido)**:
@@ -70,19 +70,24 @@ ou removidos ao longo do projeto.
 ## Phase 3 — Hacking WiFi
 
 ### MVP (primeiras a entregar)
-- [~] Deauth attack — single target — código pronto, **validação pendente**
-  (não testável neste setup: roteador da empresa em 5GHz e ESP32-S3 só
-  tem 2.4GHz; precisa de cliente 2.4GHz separado pra confirmar TX).
-- [~] Deauth broadcast — mesmo bloqueio acima.
-- [~] Beacon flood — código pronto, `esp_wifi_80211_tx` retorna OK em
-  todos os 1000 frames mas **scanner de celular não detecta os SSIDs
-  consistentemente**. Pendências de melhoria:
-  - Confirmar que TX está de fato no ar via modo promiscuous do próprio
-    ESP (sniff dos próprios beacons em outro componente).
-  - Investigar se IDF 5.4 limita beacon raw em STA mode (testar APSTA
-    + WIFI_IF_AP).
-  - Comparar com scanner de baixo nível no Mac (`wdutil`, `Wireless Diagnostics`).
-  - Ajustar IEs (HT/VHT capabilities) se filtros do scanner exigirem.
+- [~] Deauth attack — single target — TX path **agora real** (commit `028e2e2`,
+  2026-05-08): bypass de `ieee80211_raw_frame_sanity_check` via `--weaken-symbol`
+  + `wsl_bypasser.c` + helpers `inject_begin`/`inject_end` (liga promiscuous
+  antes do TX porque driver só aceita raw mgmt em modo raw). **Defaults do
+  protocolo continuam `count=10`/`reason=7`** — a mudança do default interno
+  pra 100/4 em `hacking_wifi_deauth()` é dead code via JSON (`command_router`
+  defaulta 10/7 antes); pra retomada: mover defaults pro command_router OU
+  remover do hacking_wifi pra evitar confusão. **Validação visual em cliente
+  2.4GHz ainda pendente**: testes empíricos nesta sessão (2026-05-08/11)
+  mostraram serial corrompida durante bursts grandes, então confirmar
+  TX→efeito num STA conhecido fica como tarefa de retomada.
+- [~] Deauth broadcast — mesmo bypass; warning emitido no log lembrando
+  que clients modernos podem ignorar broadcast (usar MAC específico do STA
+  pra efeito garantido). Confirmação visual também pendente.
+- [~] Beacon flood — mesmo bypass via `inject_begin/end`. APs falsos
+  deveriam aparecer em scanners 2.4GHz; confirmação visual fica pendente
+  junto com os dois itens acima. Limitação restante: scanners modernos
+  podem filtrar IEs sem HT/VHT capabilities.
 - [x] WPA handshake capture (EAPOL 4-way) → emite frames 802.11 brutos via TLV (`wpa_capture`); script de teste monta pcap
 
 ### LAN-level (atacante associado à rede)
@@ -101,7 +106,7 @@ ou removidos ao longo do projeto.
 - [x] Karma attack — `karma_start`: escuta probe req direcionado, responde com probe response forjado (BSSID = hash do SSID + prefix `0x02`). Útil pra mapear PNL; pra completar assoc precisa de Evil Twin.
 - [~] WPS attack:
   - [x] `wps_pin_test`: testa 1 PIN via supplicant da IDF; emite TLV com SSID+PSK em sucesso. Base pra brute-force lado-app.
-  - [blocked] **Pixie Dust nativo**: API pública do IDF 5.4 não expõe M2 cru → impossível sem patch invasivo. Workaround documentado: `pcap_start` + processar offline com `pixiewps`.
+  - [blocked] **Pixie Dust nativo**: API pública do IDF (5.1.2 atual, igual em 5.2+) não expõe M2 cru → impossível sem patch invasivo. Workaround documentado: `pcap_start` + processar offline com `pixiewps`.
 - [x] Channel jamming via RTS NAV-lock (`channel_jam`) — não é CW puro mas trava airtime efetivamente
 
 ## Phase 3.5 — Comandos compostos & Playbook
@@ -176,16 +181,22 @@ ou removidos ao longo do projeto.
 
 ## Phase 8 — App Flutter
 
-- [ ] Setup Flutter + flutter_blue_plus
-- [ ] Tela: pareamento BLE / discovery do device
-- [ ] Tela: dashboard (status, free heap, uptime)
-- [ ] Tela: Scan (WiFi/BLE live, com filtros)
-- [ ] Tela: Hacking (categorizada, com alvos pré-selecionados)
-- [ ] Tela: Defense (toggle detection/active, log de eventos)
-- [ ] Tela: Pcap viewer básico OU export pro file system
-- [ ] Notificações em background (defense alerts)
-- [ ] Mapa de RSSI / heatmap (stretch)
-- [ ] Tema dark/hacker (estético, baixa prioridade)
+> Detalhe completo vive em `/Volumes/SSD-Lucas/code/personal/nexus/ROADMAP.md` (raiz do app). Aqui só tracking de alto nível.
+
+- [x] Setup Flutter + flutter_blue_plus + riverpod + go_router + hive_ce
+- [x] Tela: pareamento BLE / discovery (radar + checklist dinâmica · 5 variantes de erro)
+- [x] Tela: dashboard (KPIs do heartbeat · quick playbooks reais)
+- [x] Tela: Scan — Recon · 5 abas (Wi-Fi / BLE / LAN / Probe / Dossier)
+- [x] Tela: Hacking categorizada — Offense · 8 abas (WPA / PMKID / EVIL / KARMA / WPS / ARP / BLE / MITM)
+- [x] Tela: Defense · 3 abas (Monitor / Settings / Watchdog) com toggle ARM/DISARM + mask granular persistido
+- [x] Tela: Pcap viewer · Vault com export pro file system
+- [x] Notificações em background (defense alerts críticos via `flutter_local_notifications`)
+- [x] Mapa de RSSI / heatmap — `spectrumHistoryProvider` 13×24 alimenta Defense Monitor
+- [x] Tema dark/hacker — Cold Console (verde matrix #00FF9C)
+- [x] Cobertura 100 % do catálogo: 57 cmds JSON em `NxActions` + 38 TLVs em providers Riverpod
+- [x] TargetContext global (sprint P · 2026-05-11) — telas ofensivas/LAN compartilham alvo, sem query params espalhados
+- [x] Suite: 159 testes verdes (transport + parsers + actions + domain + widgets + integration)
+- [ ] Build de produção assinado — depende do mantenedor (keystore Android, Apple Developer team, screenshots, política de privacidade pública)
 
 ## Phase 9 — Quality & Hardening
 

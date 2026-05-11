@@ -5,13 +5,24 @@ de segurança WiFi/BT em laboratório controlado.
 
 ## Hardware/build essentials
 
-- **Plataforma**: `platform = espressif32 @ 6.10.0` (pinada — não usar `latest`)
-- **Framework**: `espidf` (ESP-IDF 5.4.0). NUNCA misturar Arduino.
+- **Plataforma**: `platform = espressif32 @ 6.5.0` (pinada — **não atualizar**).
+  Downgrade obrigatório a partir do commit `028e2e2`: IDF 5.2+ adicionou um
+  filter `unsupport frame type 0c0` ANTES da função
+  `ieee80211_raw_frame_sanity_check` que bypassamos via `--weaken-symbol`
+  (`components/hacking_wifi/wsl_bypasser.c`). Sem esse downgrade, `deauth`
+  / `beacon_flood` / `channel_jam` / `deauth_storm` **silenciosamente não
+  injetam mgmt frames** (TX retorna ESP_OK, frame não vai pro ar).
+- **Framework**: `espidf` (ESP-IDF 5.1.2). NUNCA misturar Arduino.
 - **Linguagem**: C
 - **Toolchain `pio`**: `~/.platformio/penv/bin/pio` (também no PATH via `~/.zshrc`)
 - **esptool**: 5.2.0 (instalada no venv via `pip install --upgrade esptool`).
   A versão default 4.5.1 do PlatformIO **não funciona** com este chip — usar
   sempre o caminho via `scripts/flash.sh`.
+- **Patch binário pendente** (não automatizado, refazer ao trocar de máquina):
+  `~/.platformio/packages/framework-espidf@3.50102.240122/components/esp_wifi/lib/esp32s3/libnet80211.a`
+  — função `ieee80211_raw_frame_sanity_check` modificada pra `return 0`
+  (4 bytes em offset 0x2a0f de `ieee80211_output.o`: `movi.n a2,0; retw.n`).
+  Backup em `libnet80211.a.bak`. Ver comentário em `platformio.ini`.
 
 ## Fonte de verdade do Kconfig
 
@@ -123,10 +134,25 @@ Usar `monitor.sh` (pyserial direto).
 ## Validação esperada após flash
 
 `./scripts/monitor.sh` deve mostrar a cada 5s:
-- `Free SRAM: ~332 KB` (range OK: 320-340 KB)
-- `Free PSRAM: ~8.00 MB` (≈ 8386188 bytes)
-- `Total PSRAM: 8388608 bytes` (exato)
-- `ESP-IDF: 5.4.0`
+- `Free SRAM: ~120 KB` (range observado em 5.1.2 com todos componentes ativos)
+- `Free PSRAM: ~7.92 MB` (≈ 8302984 bytes)
+- `Total PSRAM: 8370428 bytes`
+- `ESP-IDF: 5.1.2`
 
 Se PSRAM = 0 → conferir `CONFIG_SPIRAM_MODE_OCT` no `sdkconfig.<env>` gerado;
 se não bater, regenerar (`rm sdkconfig.<env> && pio run`).
+
+## Mgmt frame injection (deauth/beacon/jam/storm)
+
+Stack inteira depende de 3 peças que **devem ficar sincronizadas**:
+
+1. **IDF pinada em 5.1.2** (acima) — sem isso o filter de 5.2+ dropa
+   mgmt frames antes da função wrappada.
+2. **`wsl_bypasser.c`** + flag `-Wl,--weaken-symbol=ieee80211_raw_frame_sanity_check`
+   em `platformio.ini > build_flags` — substitui a função do `libnet80211.a`
+   pela nossa que retorna 0.
+3. **`inject_begin()` / `inject_end()`** em `hacking_wifi.c` — liga
+   promiscuous antes do TX (o driver só aceita raw mgmt em modo raw) e
+   troca canal. `inject_end()` **desliga promiscuous** ao terminar —
+   isso é incompatível com `sniff_wifi`/`defense_start` rodando em
+   paralelo no mesmo timeframe; ver `COMPOSITION.md` seção 5.
