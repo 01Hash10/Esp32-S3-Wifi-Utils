@@ -1,10 +1,15 @@
 idf_component_register(
-    SRCS "hacking_wifi.c"
+    SRCS "hacking_wifi.c" "wsl_bypasser.c"
     INCLUDE_DIRS "include"
     REQUIRES protocol transport_ble esp_wifi esp_timer esp_event wpa_supplicant
 )
-# Nota: tentamos `--wrap=ieee80211_raw_frame_sanity_check` para passar mais
-# frames, mas o blob libnet80211 do IDF 5.4 faz setup de TX dentro dessa
-# função além da validação — bypassar quebra a TX silenciosamente
-# (esp_wifi_80211_tx retorna OK mas o frame não vai pro ar). Sem o wrap,
-# só ~10–20 frames passam por chamada, o que ainda é útil em rajadas curtas.
+# wsl_bypasser.c traz override de `ieee80211_raw_frame_sanity_check`. Para
+# o linker pegar nossa versão em vez da do `libnet80211.a`, o flag
+# `-Wl,--weaken-symbol=ieee80211_raw_frame_sanity_check` está em
+# `platformio.ini > build_flags` (mais simples que --wrap, que falhava
+# silenciosamente em IDF 5.4).
+#
+# Pré-requisito: ESP-IDF 5.1.x ou inferior. Em 5.2+ a Espressif adicionou
+# um filter mais cedo no caminho TX (`unsupport frame type 0c0`) que roda
+# ANTES desta função — nesse caso o bypass não alcança e só patch binário
+# do libnet80211.a resolveria. Pinamos em 5.1.2 via espressif32 @ 6.5.0.

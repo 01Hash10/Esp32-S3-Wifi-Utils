@@ -115,21 +115,26 @@ static const char *var_get(const char *name)
 
 static void var_set(const char *name, const char *value)
 {
+    // memcpy + null explícito — IDF 5.1.x exige -Wstringop-truncation safe.
+    // Helper local: copia até `max` bytes e termina null no índice `max`.
     // Update existente?
     for (int i = 0; i < PB_MAX_VARS; i++) {
         if (s_vars[i].used && strcmp(s_vars[i].name, name) == 0) {
-            strncpy(s_vars[i].value, value, PB_VAR_VALUE_MAX);
-            s_vars[i].value[PB_VAR_VALUE_MAX] = 0;
+            size_t vl = strnlen(value, PB_VAR_VALUE_MAX);
+            memcpy(s_vars[i].value, value, vl);
+            s_vars[i].value[vl] = 0;
             return;
         }
     }
     // Slot livre
     for (int i = 0; i < PB_MAX_VARS; i++) {
         if (!s_vars[i].used) {
-            strncpy(s_vars[i].name, name, PB_VAR_NAME_MAX);
-            s_vars[i].name[PB_VAR_NAME_MAX] = 0;
-            strncpy(s_vars[i].value, value, PB_VAR_VALUE_MAX);
-            s_vars[i].value[PB_VAR_VALUE_MAX] = 0;
+            size_t nl = strnlen(name, PB_VAR_NAME_MAX);
+            memcpy(s_vars[i].name, name, nl);
+            s_vars[i].name[nl] = 0;
+            size_t vl = strnlen(value, PB_VAR_VALUE_MAX);
+            memcpy(s_vars[i].value, value, vl);
+            s_vars[i].value[vl] = 0;
             s_vars[i].used = true;
             return;
         }
